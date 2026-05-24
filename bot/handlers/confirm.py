@@ -382,7 +382,13 @@ async def notify_monteur(bot, monteur_id: int, ticket: Ticket, dispatcher: Optio
         f"от <b>{_e(dispatcher['full_name'])}</b> (КРОСС)"
         if dispatcher else "от КРОСС"
     )
-    text = f"🆕 <b>Новая заявка {who}</b>\n\n" + format_ticket(ticket)
+    number = ticket.user_ticket_number or ticket.id
+    hint = (
+        f"\n\n<i>💬 Когда выполнишь — напиши боту "
+        f"«по {number} заменил кабель, акт 321» (или другой результат). "
+        f"КРОСС сразу получит уведомление о закрытии.</i>"
+    )
+    text = f"🆕 <b>Новая заявка {who}</b>\n\n" + format_ticket(ticket) + hint
     try:
         # Сначала фото, если есть
         if ticket.photos:

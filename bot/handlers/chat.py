@@ -43,12 +43,14 @@ async def process_user_text(
     await db.touch_user(user.id)
 
     history = await db.get_recent_history(user.id, limit=5)
+    open_context = await _build_open_tickets_context(user.id)
 
     try:
         ai_response = await ai.analyze_message(
             user_text=text,
             history=history,
             now=local_now(),
+            open_tickets=open_context,
         )
     except Exception:
         logger.exception("Ошибка при вызове ИИ")
@@ -229,6 +231,25 @@ async def _handle_edit(message: Message, ai_response: AIResponse) -> None:
 
 
 # --- Утилиты ----------------------------------------------------------------
+
+async def _build_open_tickets_context(user_id: int) -> list[dict]:
+    """Собирает компактный список открытых заявок для подсказки ИИ."""
+    open_tickets = await db.list_open_tickets(user_id, limit=10)
+    result: list[dict] = []
+    for t in open_tickets:
+        info: dict = {
+            "number": t.user_ticket_number or t.id,
+            "address": t.address,
+        }
+        if t.problem_description:
+            info["problem"] = t.problem_description[:120]
+        if t.created_by_id and t.created_by_id != user_id:
+            creator = await db.get_user(t.created_by_id)
+            if creator:
+                info["from_dispatcher"] = creator["full_name"]
+        result.append(info)
+    return result
+
 
 def _period_label(period: Optional[str]) -> str:
     return {

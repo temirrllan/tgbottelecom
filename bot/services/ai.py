@@ -105,10 +105,12 @@ async def analyze_message(
     user_text: str,
     history: list[dict],
     now: Optional[datetime] = None,
+    open_tickets: Optional[list[dict]] = None,
 ) -> AIResponse:
     """
     Отправляет сообщение в Gemini и возвращает структурированный ответ.
     history — последние сообщения формата [{"role": "user"|"assistant", "content": ...}].
+    open_tickets — список открытых заявок текущего пользователя для контекста.
     """
     if now is None:
         now = datetime.now().astimezone()
@@ -117,6 +119,8 @@ async def analyze_message(
         f"Текущие дата и время: {now.strftime('%Y-%m-%d %H:%M')} "
         f"({_weekday_ru(now)})."
     )
+    if open_tickets:
+        system += "\n\n" + _format_open_tickets_context(open_tickets)
 
     # Gemini использует роли user/model, контент в виде Content/Part.
     cleaned = _sanitize_history(history)
@@ -390,6 +394,34 @@ def _parse_response(raw: str) -> AIResponse:
             data={},
             reply=raw or "Не понял запрос, можешь переформулировать?",
         )
+
+
+def _format_open_tickets_context(tickets: list[dict]) -> str:
+    """
+    Описание открытых заявок монтёра — попадает в системный промпт,
+    чтобы ИИ корректно различал «закрытие назначенной заявки» от «новая заявка».
+    """
+    lines = ["У монтёра сейчас открыты следующие заявки (он их ещё не закрыл):"]
+    for t in tickets:
+        line = f"- #{t['number']} {t['address']}"
+        if t.get("problem"):
+            line += f" — {t['problem']}"
+        if t.get("from_dispatcher"):
+            line += f" (от {t['from_dispatcher']}, КРОСС)"
+        lines.append(line)
+    lines.append("")
+    lines.append(
+        "Правила:\n"
+        "- Если в сообщении назван номер из списка («по 5», «#5», «по номеру 5») — "
+        "это EDIT_TICKET с этим ticket_id.\n"
+        "- Если назван адрес или его часть, совпадающие с одной из заявок выше — "
+        "это EDIT_TICKET с её номером.\n"
+        "- Если назван ДРУГОЙ адрес, не из списка, — это SAVE_TICKET (новая заявка).\n"
+        "- Если без явной привязки и в списке только одна заявка — "
+        "это EDIT_TICKET с её номером.\n"
+        "- Если без привязки и заявок несколько — action=CHAT и попроси уточнить номер."
+    )
+    return "\n".join(lines)
 
 
 def _weekday_ru(dt: datetime) -> str:
