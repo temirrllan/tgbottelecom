@@ -38,6 +38,17 @@ CREATE TABLE IF NOT EXISTS materials (
 
 CREATE INDEX IF NOT EXISTS idx_materials_ticket_id ON materials(ticket_id);
 
+-- Фото, прикреплённые к заявке (file_id Telegram)
+CREATE TABLE IF NOT EXISTS ticket_photos (
+    id BIGSERIAL PRIMARY KEY,
+    ticket_id BIGINT NOT NULL REFERENCES tickets(id) ON DELETE CASCADE,
+    file_id TEXT NOT NULL,
+    file_unique_id TEXT,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_ticket_photos_ticket_id ON ticket_photos(ticket_id);
+
 -- История переписки для контекста ИИ
 CREATE TABLE IF NOT EXISTS conversation_history (
     id BIGSERIAL PRIMARY KEY,

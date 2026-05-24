@@ -125,7 +125,7 @@ def _normalize_dt(dt: Optional[datetime]) -> Optional[datetime]:
 
 
 async def create_ticket(user_id: int, data: TicketIn) -> int:
-    """Создаёт заявку с материалами в одной транзакции, возвращает id."""
+    """Создаёт заявку с материалами и фото в одной транзакции, возвращает id."""
     pool = _get_pool()
     async with pool.acquire() as conn:
         async with conn.transaction():
@@ -148,7 +148,25 @@ async def create_ticket(user_id: int, data: TicketIn) -> int:
                 data.act_number,
             )
             await _insert_materials(conn, ticket_id, data.materials)
+            await _insert_photos(conn, ticket_id, data.photos)
     return int(ticket_id)
+
+
+async def _insert_photos(
+    conn: asyncpg.Connection,
+    ticket_id: int,
+    file_ids: list[str],
+) -> None:
+    """Вставляет список file_id фотографий для заявки."""
+    if not file_ids:
+        return
+    await conn.executemany(
+        """
+        INSERT INTO ticket_photos (ticket_id, file_id)
+        VALUES ($1, $2)
+        """,
+        [(ticket_id, fid) for fid in file_ids],
+    )
 
 
 async def _insert_materials(
@@ -186,7 +204,7 @@ async def update_ticket(
     idx = 1
 
     for field, value in upd.model_dump(exclude_unset=True).items():
-        if field == "materials":
+        if field in ("materials", "photos"):
             continue
         if field == "visit_date":
             value = _normalize_dt(value)
@@ -223,11 +241,19 @@ async def update_ticket(
                 )
                 await _insert_materials(conn, ticket_id, upd.materials)
 
+            if upd.photos is not None:
+                # Заменяем фото полностью
+                await conn.execute(
+                    "DELETE FROM ticket_photos WHERE ticket_id = $1",
+                    ticket_id,
+                )
+                await _insert_photos(conn, ticket_id, upd.photos)
+
     return True
 
 
 async def get_ticket(user_id: int, ticket_id: int) -> Optional[Ticket]:
-    """Получает одну заявку с материалами (только если принадлежит юзеру)."""
+    """Получает одну заявку с материалами и фото (только если принадлежит юзеру)."""
     pool = _get_pool()
     async with pool.acquire() as conn:
         row = await conn.fetchrow(
@@ -237,7 +263,12 @@ async def get_ticket(user_id: int, ticket_id: int) -> Optional[Ticket]:
         if not row:
             return None
         materials = await _fetch_materials(conn, [ticket_id])
-    return _row_to_ticket(row, materials.get(ticket_id, []))
+        photos = await _fetch_photos(conn, [ticket_id])
+    return _row_to_ticket(
+        row,
+        materials.get(ticket_id, []),
+        photos.get(ticket_id, []),
+    )
 
 
 async def get_last_ticket_today(user_id: int) -> Optional[Ticket]:
@@ -257,7 +288,12 @@ async def get_last_ticket_today(user_id: int) -> Optional[Ticket]:
         if not row:
             return None
         materials = await _fetch_materials(conn, [row["id"]])
-    return _row_to_ticket(row, materials.get(row["id"], []))
+        photos = await _fetch_photos(conn, [row["id"]])
+    return _row_to_ticket(
+        row,
+        materials.get(row["id"], []),
+        photos.get(row["id"], []),
+    )
 
 
 async def list_tickets(
@@ -301,8 +337,12 @@ async def list_tickets(
             return []
         ticket_ids = [r["id"] for r in rows]
         materials = await _fetch_materials(conn, ticket_ids)
+        photos = await _fetch_photos(conn, ticket_ids)
 
-    return [_row_to_ticket(r, materials.get(r["id"], [])) for r in rows]
+    return [
+        _row_to_ticket(r, materials.get(r["id"], []), photos.get(r["id"], []))
+        for r in rows
+    ]
 
 
 async def materials_summary(
@@ -364,7 +404,32 @@ async def _fetch_materials(
     return result
 
 
-def _row_to_ticket(row, materials: list[Material]) -> Ticket:
+async def _fetch_photos(
+    conn: asyncpg.Connection,
+    ticket_ids: list[int],
+) -> dict[int, list[str]]:
+    """Загружает file_id фотографий для нескольких заявок одним запросом."""
+    if not ticket_ids:
+        return {}
+    rows = await conn.fetch(
+        """
+        SELECT ticket_id, file_id FROM ticket_photos
+        WHERE ticket_id = ANY($1::bigint[])
+        ORDER BY id
+        """,
+        ticket_ids,
+    )
+    result: dict[int, list[str]] = {}
+    for row in rows:
+        result.setdefault(row["ticket_id"], []).append(row["file_id"])
+    return result
+
+
+def _row_to_ticket(
+    row,
+    materials: list[Material],
+    photos: Optional[list[str]] = None,
+) -> Ticket:
     return Ticket(
         id=row["id"],
         user_id=row["user_id"],
@@ -377,6 +442,7 @@ def _row_to_ticket(row, materials: list[Material]) -> Ticket:
         created_at=row["created_at"],
         updated_at=row["updated_at"],
         materials=materials,
+        photos=photos or [],
     )
 
 

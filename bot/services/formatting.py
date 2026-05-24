@@ -30,6 +30,8 @@ def format_ticket(t: Ticket) -> str:
         lines.append(f"📦 Материалы: {materials_str}")
     if t.act_number:
         lines.append(f"📄 Акт: №{_e(t.act_number)}")
+    if t.photos:
+        lines.append(f"📷 Фото: {len(t.photos)}")
     lines.append(f"🔁 Повторная: {'да' if t.is_repeat_visit else 'нет'}")
     return "\n".join(lines)
 

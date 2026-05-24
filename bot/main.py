@@ -12,7 +12,7 @@ from aiogram.enums import ParseMode
 from aiogram.fsm.storage.memory import MemoryStorage
 from dotenv import load_dotenv
 
-from bot.handlers import chat, commands, confirm
+from bot.handlers import chat, commands, confirm, photo
 from bot.services import db
 
 logger = logging.getLogger(__name__)
@@ -71,9 +71,11 @@ async def main() -> None:
     # Порядок важен:
     #   1) команды,
     #   2) подтверждение заявки (перехватывает текст в FSM-состоянии),
-    #   3) свободный чат с ИИ.
+    #   3) фотографии,
+    #   4) свободный чат с ИИ.
     dp.include_router(commands.router)
     dp.include_router(confirm.router)
+    dp.include_router(photo.router)
     dp.include_router(chat.router)
 
     # Инициализируем БД и применяем миграции

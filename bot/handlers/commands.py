@@ -22,6 +22,7 @@ WELCOME_TEXT = (
     "👋 Привет! Я — ИИ-ассистент монтёра Казактелекома.\n\n"
     "Просто пиши мне в свободной форме, что сделал — я сам разберу и сохраню:\n"
     "<i>«Был на Абая 45 кв 12, заменил кабель 10м, акт №321»</i>\n\n"
+    "Можно прикладывать фото — с подписью или просто к черновику.\n\n"
     "А ещё можно спрашивать про свои заявки:\n"
     "<i>«Что я делал сегодня?», «Сколько кабеля потратил за месяц?»</i>\n\n"
     "Команды:\n"
@@ -31,6 +32,7 @@ WELCOME_TEXT = (
     "/month — заявки за месяц + материалы\n"
     "/find [адрес] — поиск\n"
     "/edit — редактировать последнюю заявку\n"
+    "/photos [id] — фото заявки\n"
     "/cancel — отмена"
 )
 
@@ -38,7 +40,12 @@ WELCOME_TEXT = (
 HELP_TEXT = (
     "<b>Что я умею:</b>\n\n"
     "📝 <b>Сохранение заявок</b>\n"
-    "Опиши заявку обычным языком — я извлеку адрес, материалы, акт и сохраню.\n\n"
+    "Опиши заявку обычным языком — я извлеку адрес, материалы, акт и сохраню.\n"
+    "Перед сохранением покажу превью с кнопками ✅ / ✏️ / ❌.\n\n"
+    "📷 <b>Фото</b>\n"
+    "Пришли фото с подписью — я создам заявку.\n"
+    "Или просто добавь фото к открытому черновику — оно прикрепится.\n"
+    "Просмотр фото сохранённой заявки: /photos [id].\n\n"
     "🔍 <b>Поиск и отчёты</b>\n"
     "Спрашивай: «что было вчера», «сколько патчкордов за неделю», "
     "«заявки по Абая».\n\n"
@@ -148,3 +155,27 @@ async def cmd_cancel(message: Message, state: FSMContext) -> None:
     """Сбрасывает текущее состояние."""
     await state.clear()
     await message.answer("Окей, отменил. Что дальше?")
+
+
+@router.message(Command("photos"))
+async def cmd_photos(message: Message, command: CommandObject) -> None:
+    """Показывает фото конкретной заявки: /photos 123."""
+    if message.from_user is None:
+        return
+    arg = (command.args or "").strip()
+    if not arg or not arg.isdigit():
+        await message.answer(
+            "Укажи номер заявки: <code>/photos 123</code>"
+        )
+        return
+    ticket = await db.get_ticket(message.from_user.id, int(arg))
+    if ticket is None:
+        await message.answer("Не нашёл такой заявки.")
+        return
+    if not ticket.photos:
+        await message.answer(f"К заявке #{ticket.id} фото не прикреплено.")
+        return
+
+    from bot.handlers.confirm import send_photos
+    await message.answer(f"📷 Фото заявки #{ticket.id} ({len(ticket.photos)} шт):")
+    await send_photos(message, ticket.photos)

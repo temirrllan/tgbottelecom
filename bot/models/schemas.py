@@ -34,6 +34,8 @@ class TicketIn(BaseModel):
     is_repeat_visit: bool = False
     act_number: Optional[str] = None
     materials: list[MaterialIn] = Field(default_factory=list)
+    # Telegram file_id фотографий, прикреплённых к заявке
+    photos: list[str] = Field(default_factory=list)
 
 
 class TicketUpdate(BaseModel):
@@ -45,6 +47,7 @@ class TicketUpdate(BaseModel):
     is_repeat_visit: Optional[bool] = None
     act_number: Optional[str] = None
     materials: Optional[list[MaterialIn]] = None
+    photos: Optional[list[str]] = None
 
 
 class Ticket(BaseModel):
@@ -60,6 +63,7 @@ class Ticket(BaseModel):
     created_at: datetime
     updated_at: datetime
     materials: list[Material] = Field(default_factory=list)
+    photos: list[str] = Field(default_factory=list)
 
 
 # --- Ответ ИИ ----------------------------------------------------------------

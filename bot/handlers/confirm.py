@@ -14,6 +14,7 @@ from aiogram.types import (
     CallbackQuery,
     InlineKeyboardButton,
     InlineKeyboardMarkup,
+    InputMediaPhoto,
     Message,
 )
 from pydantic import ValidationError
@@ -84,9 +85,34 @@ def _format_preview(t: TicketIn) -> str:
         lines.append(f"📦 Материалы: {mats}")
     if t.act_number:
         lines.append(f"📄 Акт: №{_e(t.act_number)}")
+    if t.photos:
+        lines.append(f"📷 Фото: {len(t.photos)}")
     if t.is_repeat_visit:
         lines.append("🔁 Повторная: да")
     return "\n".join(lines)
+
+
+async def send_photos(message: Message, file_ids: list[str]) -> None:
+    """
+    Отправляет фотографии заявки. До 10 шт в одном альбоме,
+    Telegram режет больше. Если фото одно — отправляем как обычное.
+    """
+    if not file_ids or not message.bot:
+        return
+    if len(file_ids) == 1:
+        try:
+            await message.bot.send_photo(message.chat.id, file_ids[0])
+        except TelegramBadRequest:
+            logger.exception("Не удалось отправить фото")
+        return
+    # Telegram разрешает максимум 10 элементов в media group
+    for chunk_start in range(0, len(file_ids), 10):
+        chunk = file_ids[chunk_start:chunk_start + 10]
+        media = [InputMediaPhoto(media=fid) for fid in chunk]
+        try:
+            await message.bot.send_media_group(message.chat.id, media=media)
+        except TelegramBadRequest:
+            logger.exception("Не удалось отправить альбом фото")
 
 
 def _fmt_qty(q) -> str:
@@ -162,6 +188,10 @@ async def on_save(cb: CallbackQuery, state: FSMContext) -> None:
         await cb.message.edit_reply_markup(reply_markup=None)
     except TelegramBadRequest:
         pass
+
+    # Сначала фото, потом текстовая карточка
+    if saved and saved.photos:
+        await send_photos(cb.message, saved.photos)
 
     text = "✅ Заявка сохранена!"
     if saved is not None:
