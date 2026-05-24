@@ -27,6 +27,14 @@ CREATE INDEX IF NOT EXISTS idx_tickets_user_id ON tickets(user_id);
 CREATE INDEX IF NOT EXISTS idx_tickets_visit_date ON tickets(visit_date);
 CREATE INDEX IF NOT EXISTS idx_tickets_user_date ON tickets(user_id, visit_date DESC);
 
+-- Поля, которые извлекаются Vision из скриншота CRM-заявки.
+-- ALTER ... IF NOT EXISTS делает миграцию идемпотентной.
+ALTER TABLE tickets ADD COLUMN IF NOT EXISTS customer_name TEXT;
+ALTER TABLE tickets ADD COLUMN IF NOT EXISTS customer_phone TEXT;
+ALTER TABLE tickets ADD COLUMN IF NOT EXISTS crm_ticket_number TEXT;
+ALTER TABLE tickets ADD COLUMN IF NOT EXISTS license_account TEXT;
+CREATE INDEX IF NOT EXISTS idx_tickets_crm_number ON tickets(crm_ticket_number);
+
 -- Материалы по заявке
 CREATE TABLE IF NOT EXISTS materials (
     id BIGSERIAL PRIMARY KEY,

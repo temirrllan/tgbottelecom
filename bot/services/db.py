@@ -134,9 +134,10 @@ async def create_ticket(user_id: int, data: TicketIn) -> int:
                 """
                 INSERT INTO tickets (
                     user_id, address, problem_description, work_done,
-                    visit_date, is_repeat_visit, act_number
+                    visit_date, is_repeat_visit, act_number,
+                    customer_name, customer_phone, crm_ticket_number, license_account
                 )
-                VALUES ($1, $2, $3, $4, $5, $6, $7)
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
                 RETURNING id
                 """,
                 user_id,
@@ -146,6 +147,10 @@ async def create_ticket(user_id: int, data: TicketIn) -> int:
                 visit,
                 data.is_repeat_visit,
                 data.act_number,
+                data.customer_name,
+                data.customer_phone,
+                data.crm_ticket_number,
+                data.license_account,
             )
             await _insert_materials(conn, ticket_id, data.materials)
             await _insert_photos(conn, ticket_id, data.photos)
@@ -439,6 +444,10 @@ def _row_to_ticket(
         visit_date=row["visit_date"],
         is_repeat_visit=row["is_repeat_visit"],
         act_number=row["act_number"],
+        customer_name=row["customer_name"],
+        customer_phone=row["customer_phone"],
+        crm_ticket_number=row["crm_ticket_number"],
+        license_account=row["license_account"],
         created_at=row["created_at"],
         updated_at=row["updated_at"],
         materials=materials,

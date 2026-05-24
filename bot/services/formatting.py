@@ -16,9 +16,16 @@ def _e(value) -> str:
 def format_ticket(t: Ticket) -> str:
     """Красиво форматирует одну заявку с эмодзи."""
     lines = [f"📋 Заявка #{t.id}"]
+    if t.crm_ticket_number:
+        lines.append(f"🆔 CRM: {_e(t.crm_ticket_number)}")
     lines.append(f"📍 Адрес: {_e(t.address)}")
     lines.append(f"🕐 Время: {t.visit_date.strftime('%d.%m.%Y %H:%M')}")
-
+    if t.customer_name:
+        lines.append(f"👤 Абонент: {_e(t.customer_name)}")
+    if t.customer_phone:
+        lines.append(f"📞 Тел: {_e(t.customer_phone)}")
+    if t.license_account:
+        lines.append(f"💳 Лиц.счёт: {_e(t.license_account)}")
     if t.problem_description:
         lines.append(f"🔧 Проблема: {_e(t.problem_description)}")
     if t.work_done:

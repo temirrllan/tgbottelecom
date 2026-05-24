@@ -26,13 +26,18 @@ class Material(MaterialIn):
 # --- Заявки ------------------------------------------------------------------
 
 class TicketIn(BaseModel):
-    """Данные новой заявки, извлечённые ИИ."""
+    """Данные новой заявки, извлечённые ИИ из текста или скриншота CRM."""
     address: str
     problem_description: Optional[str] = None
     work_done: Optional[str] = None
     visit_date: Optional[datetime] = None
     is_repeat_visit: bool = False
     act_number: Optional[str] = None
+    # Поля абонента и CRM, извлекаются из скриншота заявки
+    customer_name: Optional[str] = None
+    customer_phone: Optional[str] = None
+    crm_ticket_number: Optional[str] = None
+    license_account: Optional[str] = None
     materials: list[MaterialIn] = Field(default_factory=list)
     # Telegram file_id фотографий, прикреплённых к заявке
     photos: list[str] = Field(default_factory=list)
@@ -46,6 +51,10 @@ class TicketUpdate(BaseModel):
     visit_date: Optional[datetime] = None
     is_repeat_visit: Optional[bool] = None
     act_number: Optional[str] = None
+    customer_name: Optional[str] = None
+    customer_phone: Optional[str] = None
+    crm_ticket_number: Optional[str] = None
+    license_account: Optional[str] = None
     materials: Optional[list[MaterialIn]] = None
     photos: Optional[list[str]] = None
 
@@ -60,6 +69,10 @@ class Ticket(BaseModel):
     visit_date: datetime
     is_repeat_visit: bool = False
     act_number: Optional[str] = None
+    customer_name: Optional[str] = None
+    customer_phone: Optional[str] = None
+    crm_ticket_number: Optional[str] = None
+    license_account: Optional[str] = None
     created_at: datetime
     updated_at: datetime
     materials: list[Material] = Field(default_factory=list)

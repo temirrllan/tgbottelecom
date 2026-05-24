@@ -146,6 +146,90 @@ async def analyze_message(
     return _parse_response(raw)
 
 
+VISION_PROMPT = """На вход дано изображение. Скорее всего это скриншот заявки из CRM-системы Казактелекома («Единичное повреждение», «WFM», окно заявки и т. п.).
+
+Если это действительно скриншот CRM-заявки — извлеки данные и верни JSON:
+{
+  "is_crm_ticket": true,
+  "address": "адрес из поля «Адрес» (улица, дом, квартира) — обязательно",
+  "customer_name": "ФИО из поля «Владелец» или «Абонент»",
+  "customer_phone": "телефон из «Мобильный», «Контакты» — только цифры",
+  "crm_ticket_number": "номер заявки (большое число в заголовке или поле «Номер CRM»)",
+  "license_account": "номер из «Лицевой счёт»",
+  "problem_description": "описание проблемы — объедини текст из «Тип обращения» / «Заявлено» + комментарий оператора",
+  "visit_date": "ISO 8601 или null (если на скриншоте есть дата/время заявки)",
+  "is_repeat_visit": true | false
+}
+
+Если на изображении НЕ скриншот CRM-заявки (это фото работы, акта, кабеля, оборудования, обычный пейзаж) — верни:
+{
+  "is_crm_ticket": false
+}
+
+Возвращай строго JSON без обёрток.
+"""
+
+
+async def analyze_crm_photo(
+    image_bytes: bytes,
+    mime_type: str = "image/jpeg",
+) -> Optional[dict]:
+    """
+    Прогоняет изображение через Gemini Vision и пытается извлечь поля CRM-заявки.
+    Возвращает словарь с распознанными полями (без флага is_crm_ticket),
+    либо None — если не распознал или произошла ошибка.
+    """
+    client = get_client()
+    try:
+        response = await client.aio.models.generate_content(
+            model=MODEL,
+            contents=[{
+                "role": "user",
+                "parts": [
+                    {"inline_data": {
+                        "mime_type": mime_type,
+                        "data": image_bytes,
+                    }},
+                    {"text": VISION_PROMPT},
+                ],
+            }],
+            config=types.GenerateContentConfig(
+                response_mime_type="application/json",
+                max_output_tokens=MAX_TOKENS,
+                temperature=0.1,
+            ),
+        )
+    except Exception:
+        logger.exception("Ошибка вызова Gemini Vision")
+        return None
+
+    raw = (response.text or "").strip()
+    if not raw:
+        return None
+
+    text = raw
+    fence = re.match(r"^```(?:json)?\s*(.*?)\s*```$", text, re.DOTALL)
+    if fence:
+        text = fence.group(1).strip()
+
+    try:
+        data = json.loads(text)
+    except json.JSONDecodeError:
+        logger.warning("Vision вернул невалидный JSON: %s", raw[:300])
+        return None
+
+    if not isinstance(data, dict) or not data.get("is_crm_ticket"):
+        return None
+
+    # Возвращаем только полезные поля, без флага
+    data.pop("is_crm_ticket", None)
+    if not data.get("address"):
+        # Адрес обязателен, без него заявку не построить
+        logger.info("Vision не нашёл адрес на скриншоте")
+        return None
+    return data
+
+
 async def merge_ticket(user_text: str, pending: dict) -> dict:
     """
     Сливает пользовательскую правку с ещё не сохранённой заявкой.
