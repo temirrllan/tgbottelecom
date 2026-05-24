@@ -11,6 +11,7 @@ from aiogram.types import Message
 from bot.services import db
 from bot.services.formatting import (
     format_materials_summary,
+    format_tickets_by_day,
     format_tickets_list,
 )
 from bot.services.roles import is_dispatcher
@@ -127,12 +128,12 @@ async def cmd_today(message: Message) -> None:
 
 @router.message(Command("week"))
 async def cmd_week(message: Message) -> None:
-    """Заявки за неделю."""
+    """Заявки за неделю, сгруппированные по дням."""
     if message.from_user is None:
         return
     tickets = await db.list_tickets(message.from_user.id, period="week")
     await message.answer(
-        format_tickets_list(tickets, header="📅 Заявки за неделю"),
+        format_tickets_by_day(tickets, header="📅 Заявки за неделю"),
     )
 
 

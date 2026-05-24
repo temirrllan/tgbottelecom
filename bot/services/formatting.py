@@ -1,6 +1,7 @@
 """Форматирование заявок и сводок для вывода в Telegram."""
 from __future__ import annotations
 
+from datetime import date
 from decimal import Decimal
 from html import escape
 from typing import Iterable
@@ -57,6 +58,67 @@ def format_tickets_list(tickets: Iterable[Ticket], header: str = "") -> str:
     for t in tickets:
         parts.append(format_ticket(t))
     return "\n\n".join(parts)
+
+
+_WEEKDAY_RU = [
+    "Понедельник", "Вторник", "Среда", "Четверг",
+    "Пятница", "Суббота", "Воскресенье",
+]
+_MONTH_RU = [
+    "", "января", "февраля", "марта", "апреля", "мая", "июня",
+    "июля", "августа", "сентября", "октября", "ноября", "декабря",
+]
+
+
+def format_tickets_by_day(
+    tickets: Iterable[Ticket],
+    header: str = "",
+) -> str:
+    """
+    Группирует заявки по дням недели. Внутри дня — хронологически (по времени).
+    Используется для /week — чтобы было видно, что сделано в каждый из дней.
+    """
+    tickets = list(tickets)
+    if not tickets:
+        return (_e(header) + "\n\nЗаявок не найдено.").strip()
+
+    # Группировка по локальной дате визита
+    by_day: dict[date, list[Ticket]] = {}
+    for t in tickets:
+        day = to_local(t.visit_date).date()
+        by_day.setdefault(day, []).append(t)
+
+    # Хронологически (понедельник → воскресенье)
+    days_ordered = sorted(by_day.keys())
+
+    parts: list[str] = []
+    if header:
+        parts.append(f"<b>{_e(header)}</b> (всего: {len(tickets)})")
+
+    for day in days_ordered:
+        day_tickets = sorted(by_day[day], key=lambda x: x.visit_date)
+        day_name = _WEEKDAY_RU[day.weekday()]
+        date_str = f"{day.day} {_MONTH_RU[day.month]}"
+        parts.append(
+            f"━━━━━━━━━━━━━━━\n"
+            f"📅 <b>{day_name}, {date_str}</b> — {len(day_tickets)} "
+            f"{_ticket_word(len(day_tickets))}"
+        )
+        for t in day_tickets:
+            parts.append(format_ticket(t))
+
+    return "\n\n".join(parts)
+
+
+def _ticket_word(n: int) -> str:
+    """Склонение «заявка»."""
+    n10 = n % 10
+    n100 = n % 100
+    if n10 == 1 and n100 != 11:
+        return "заявка"
+    if 2 <= n10 <= 4 and not (12 <= n100 <= 14):
+        return "заявки"
+    return "заявок"
 
 
 def format_materials_summary(rows: list[dict], header: str = "Материалы за период") -> str:

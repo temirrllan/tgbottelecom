@@ -16,6 +16,7 @@ from bot.services import ai, db
 from bot.services.formatting import (
     format_materials_summary,
     format_ticket,
+    format_tickets_by_day,
     format_tickets_list,
 )
 from bot.services.tz import local_now
@@ -127,9 +128,12 @@ async def _handle_query(message: Message, ai_response: AIResponse) -> None:
 
     elif query_type == "list_tickets":
         tickets = await db.list_tickets(user_id, period=period)
-        text = format_tickets_list(
-            tickets, header=f"📅 Заявки за {_period_label(period)}",
-        )
+        header = f"📅 Заявки за {_period_label(period)}"
+        # Для недели — группируем по дням, чтобы видеть «понедельник / вторник...»
+        if period == "week":
+            text = format_tickets_by_day(tickets, header=header)
+        else:
+            text = format_tickets_list(tickets, header=header)
 
     else:  # last_tickets и фоллбэк
         tickets = await db.list_tickets(user_id, limit=int(limit))
