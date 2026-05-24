@@ -147,29 +147,45 @@ async def show_preview(
     intro: str = "",
 ) -> None:
     """Сохраняет черновик в FSM и присылает превью с кнопками."""
+    # Гасим кнопки на старых превью / пикерах, чтобы не плодились дубли
+    await _disable_old_preview(message, state)
+
     await state.set_state(TicketConfirm.waiting)
-    await state.update_data(pending_ticket=ticket.model_dump(mode="json"))
+    await state.update_data(
+        pending_ticket=ticket.model_dump(mode="json"),
+        picker_message_id=None,
+    )
 
     head = intro or "Проверь данные перед сохранением:"
-    text = f"{head}\n\n{_format_preview(ticket)}\n\nСохранить?"
+    photo_hint = (
+        "" if ticket.photos
+        else "\n\n<i>📷 Можешь приложить фото — пришли картинку.</i>"
+    )
+    text = (
+        f"{head}\n\n{_format_preview(ticket)}{photo_hint}\n\nСохранить?"
+    )
     sent = await message.answer(text, reply_markup=_keyboard())
     await state.update_data(preview_message_id=sent.message_id)
 
 
 async def _disable_old_preview(message: Message, state: FSMContext) -> None:
-    """Снимает кнопки со старого превью, чтобы не было путаницы."""
+    """Снимает кнопки со старого превью и со старого монтёр-пикера, если есть."""
     data = await state.get_data()
-    old_id = data.get("preview_message_id")
-    if not old_id or not message.bot:
+    bot = message.bot
+    if not bot:
         return
-    try:
-        await message.bot.edit_message_reply_markup(
-            chat_id=message.chat.id,
-            message_id=old_id,
-            reply_markup=None,
-        )
-    except TelegramBadRequest:
-        pass
+    for key in ("preview_message_id", "picker_message_id"):
+        msg_id = data.get(key)
+        if not msg_id:
+            continue
+        try:
+            await bot.edit_message_reply_markup(
+                chat_id=message.chat.id,
+                message_id=msg_id,
+                reply_markup=None,
+            )
+        except TelegramBadRequest:
+            pass
 
 
 # --- Кнопка «Сохранить» -----------------------------------------------------
@@ -282,10 +298,12 @@ async def _show_monteur_picker(cb: CallbackQuery, state: FSMContext) -> None:
         await cb.message.edit_reply_markup(reply_markup=None)
     except TelegramBadRequest:
         pass
-    await cb.message.answer(
+    picker_msg = await cb.message.answer(
         "👥 <b>Кому отправить заявку?</b>",
         reply_markup=InlineKeyboardMarkup(inline_keyboard=rows),
     )
+    # Запоминаем id, чтобы убрать кнопки если КРОСС добавит фото
+    await state.update_data(picker_message_id=picker_msg.message_id)
     await cb.answer()
 
 
@@ -467,7 +485,6 @@ async def apply_text_edit(message: Message, state: FSMContext, text: str) -> Non
         )
         return
 
-    await _disable_old_preview(message, state)
     await show_preview(
         message, state, merged_ticket,
         intro="✏️ Обновил черновик:",
