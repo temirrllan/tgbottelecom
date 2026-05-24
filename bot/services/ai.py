@@ -146,6 +146,76 @@ async def analyze_message(
     return _parse_response(raw)
 
 
+async def merge_ticket(user_text: str, pending: dict) -> dict:
+    """
+    Сливает пользовательскую правку с ещё не сохранённой заявкой.
+    Возвращает обновлённый словарь TicketIn (в JSON-совместимом виде).
+    При ошибке возвращает исходный pending.
+    """
+    pending_json = json.dumps(pending, ensure_ascii=False, default=str)
+
+    merge_system = (
+        "Ты помогаешь монтёру отредактировать черновик заявки.\n"
+        "Тебе дают текущий JSON заявки и текст правки от пользователя.\n"
+        "Верни ОБНОВЛЁННЫЙ полный JSON заявки в том же формате:\n"
+        "{\n"
+        '  "address": "строка",\n'
+        '  "problem_description": "строка или null",\n'
+        '  "work_done": "строка или null",\n'
+        '  "visit_date": "ISO 8601 или null",\n'
+        '  "is_repeat_visit": true | false,\n'
+        '  "act_number": "строка или null",\n'
+        '  "materials": [{"name": "...", "quantity": число, "unit": "..."}]\n'
+        "}\n\n"
+        "Правила:\n"
+        "- Новый материал из правки — добавь к существующим.\n"
+        "- Материал с тем же именем — обнови количество.\n"
+        "- Если правка меняет поле — замени значение.\n"
+        "- Поля, которых правка не касается, оставь как было.\n"
+        "- Возвращай только JSON без обёрток."
+    )
+
+    user_prompt = (
+        f"Текущий черновик:\n{pending_json}\n\n"
+        f"Правка от монтёра: {user_text}\n\n"
+        f"Верни обновлённый JSON."
+    )
+
+    client = get_client()
+    try:
+        response = await client.aio.models.generate_content(
+            model=MODEL,
+            contents=[{"role": "user", "parts": [{"text": user_prompt}]}],
+            config=types.GenerateContentConfig(
+                system_instruction=merge_system,
+                response_mime_type="application/json",
+                max_output_tokens=MAX_TOKENS,
+                temperature=0.2,
+            ),
+        )
+    except Exception:
+        logger.exception("Ошибка merge_ticket")
+        return pending
+
+    raw = (response.text or "").strip()
+    if not raw:
+        return pending
+
+    text = raw
+    fence = re.match(r"^```(?:json)?\s*(.*?)\s*```$", text, re.DOTALL)
+    if fence:
+        text = fence.group(1).strip()
+
+    try:
+        merged = json.loads(text)
+        if isinstance(merged, dict) and "address" in merged:
+            return merged
+        return pending
+    except json.JSONDecodeError:
+        logger.warning("Не удалось распарсить merge_ticket: %s", raw[:200])
+        return pending
+
+
 def _parse_response(raw: str) -> AIResponse:
     """Парсит JSON-ответ Gemini, мягко обрабатывая возможные обёртки."""
     text = raw.strip()

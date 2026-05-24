@@ -6,9 +6,11 @@ from datetime import datetime
 from typing import Optional
 
 from aiogram import Router, F
+from aiogram.fsm.context import FSMContext
 from aiogram.types import Message
 from pydantic import ValidationError
 
+from bot.handlers.confirm import show_preview
 from bot.models.schemas import AIResponse, TicketIn, TicketUpdate
 from bot.services import ai, db
 from bot.services.formatting import (
@@ -22,7 +24,7 @@ router = Router(name="chat")
 
 
 @router.message(F.text & ~F.text.startswith("/"))
-async def handle_text(message: Message) -> None:
+async def handle_text(message: Message, state: FSMContext) -> None:
     """Любое текстовое сообщение, кроме команд, идёт через ИИ."""
     user = message.from_user
     if user is None or not message.text:
@@ -53,7 +55,7 @@ async def handle_text(message: Message) -> None:
 
     # Маршрутизируем по action
     if ai_response.action == "SAVE_TICKET":
-        await _handle_save(message, ai_response)
+        await _handle_save(message, ai_response, state)
     elif ai_response.action == "QUERY":
         await _handle_query(message, ai_response)
     elif ai_response.action == "EDIT_TICKET":
@@ -64,8 +66,12 @@ async def handle_text(message: Message) -> None:
 
 # --- SAVE_TICKET ------------------------------------------------------------
 
-async def _handle_save(message: Message, ai_response: AIResponse) -> None:
-    """Сохраняет новую заявку в БД."""
+async def _handle_save(
+    message: Message,
+    ai_response: AIResponse,
+    state: FSMContext,
+) -> None:
+    """Готовит черновик заявки и показывает превью с кнопками подтверждения."""
     if message.from_user is None:
         return
     try:
@@ -78,14 +84,7 @@ async def _handle_save(message: Message, ai_response: AIResponse) -> None:
         )
         return
 
-    ticket_id = await db.create_ticket(message.from_user.id, ticket_in)
-    saved = await db.get_ticket(message.from_user.id, ticket_id)
-    if saved is None:
-        await message.answer("Сохранил, но не смог прочитать обратно. Странно.")
-        return
-
-    reply = ai_response.reply or "✅ Заявка сохранена!"
-    await message.answer(f"{reply}\n\n{format_ticket(saved)}")
+    await show_preview(message, state, ticket_in, intro=ai_response.reply or "")
 
 
 # --- QUERY ------------------------------------------------------------------
