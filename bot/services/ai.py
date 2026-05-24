@@ -1,6 +1,8 @@
-"""Логика работы с Google Gemini API для понимания сообщений монтёров."""
+"""Логика работы с OpenAI API для понимания сообщений монтёров."""
 from __future__ import annotations
 
+import base64
+import io
 import json
 import logging
 import os
@@ -8,35 +10,32 @@ import re
 from datetime import datetime
 from typing import Optional
 
-from google import genai
-from google.genai import errors as genai_errors
-from google.genai import types
+from openai import AsyncOpenAI, RateLimitError
 
 from bot.models.schemas import AIResponse
 
 logger = logging.getLogger(__name__)
 
-# Модель Gemini, настраивается переменной окружения GEMINI_MODEL.
-# Варианты: gemini-2.5-flash (умнее), gemini-2.5-flash-lite (выше free tier).
-MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
-MAX_TOKENS = int(os.getenv("GEMINI_MAX_TOKENS", "3000"))
+# Модели OpenAI настраиваются переменными окружения
+CHAT_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
+VISION_MODEL = os.getenv("OPENAI_VISION_MODEL", "gpt-4o-mini")
+WHISPER_MODEL = os.getenv("OPENAI_WHISPER_MODEL", "whisper-1")
+MAX_TOKENS = int(os.getenv("OPENAI_MAX_TOKENS", "3000"))
 
-_client: Optional[genai.Client] = None
+_client: Optional[AsyncOpenAI] = None
+
+
+def get_client() -> AsyncOpenAI:
+    """Ленивая инициализация клиента OpenAI."""
+    global _client
+    if _client is None:
+        _client = AsyncOpenAI(api_key=os.environ["OPENAI_API_KEY"])
+    return _client
 
 
 def _is_rate_limit_error(err: Exception) -> bool:
-    """Определяет, что упёрлись в дневной лимит API."""
-    if isinstance(err, genai_errors.ClientError):
-        return getattr(err, "code", None) == 429
-    return False
-
-
-def get_client() -> genai.Client:
-    """Ленивая инициализация клиента Gemini."""
-    global _client
-    if _client is None:
-        _client = genai.Client(api_key=os.environ["GEMINI_API_KEY"])
-    return _client
+    """OpenAI бросает RateLimitError при достижении лимитов."""
+    return isinstance(err, RateLimitError)
 
 
 SYSTEM_PROMPT = """Ты — ИИ-ассистент монтёра АО «Казактелеком».
@@ -108,7 +107,7 @@ async def analyze_message(
     open_tickets: Optional[list[dict]] = None,
 ) -> AIResponse:
     """
-    Отправляет сообщение в Gemini и возвращает структурированный ответ.
+    Отправляет сообщение в OpenAI и возвращает структурированный ответ.
     history — последние сообщения формата [{"role": "user"|"assistant", "content": ...}].
     open_tickets — список открытых заявок текущего пользователя для контекста.
     """
@@ -122,184 +121,46 @@ async def analyze_message(
     if open_tickets:
         system += "\n\n" + _format_open_tickets_context(open_tickets)
 
-    # Gemini использует роли user/model, контент в виде Content/Part.
     cleaned = _sanitize_history(history)
-    contents: list[dict] = []
+    messages: list[dict] = [{"role": "system", "content": system}]
     for msg in cleaned:
-        role = "model" if msg["role"] == "assistant" else "user"
-        contents.append({"role": role, "parts": [{"text": msg["content"]}]})
-    contents.append({"role": "user", "parts": [{"text": user_text}]})
+        messages.append({"role": msg["role"], "content": msg["content"]})
+    messages.append({"role": "user", "content": user_text})
 
     client = get_client()
     try:
-        response = await client.aio.models.generate_content(
-            model=MODEL,
-            contents=contents,
-            config=types.GenerateContentConfig(
-                system_instruction=system,
-                response_mime_type="application/json",
-                max_output_tokens=MAX_TOKENS,
-                temperature=0.3,
-            ),
+        response = await client.chat.completions.create(
+            model=CHAT_MODEL,
+            messages=messages,
+            response_format={"type": "json_object"},
+            max_tokens=MAX_TOKENS,
+            temperature=0.3,
         )
     except Exception as err:
         if _is_rate_limit_error(err):
-            logger.warning("Gemini API rate limit достигнут")
+            logger.warning("OpenAI API rate limit достигнут")
             return AIResponse(
                 action="CHAT",
                 data={},
                 reply=(
-                    "🚦 Дневной лимит ИИ исчерпан. "
-                    "Завтра обнулится. Если срочно — обратись к админу, "
-                    "пусть поднимет квоту."
+                    "🚦 ИИ временно перегружен. Попробуй ещё раз через минуту."
                 ),
             )
-        logger.exception("Ошибка обращения к Gemini API")
+        logger.exception("Ошибка обращения к OpenAI API")
         return AIResponse(
             action="CHAT",
             data={},
             reply="Извини, у меня сейчас проблемы со связью. Попробуй ещё раз через минуту.",
         )
 
-    raw = (response.text or "").strip()
+    raw = (response.choices[0].message.content or "").strip()
     if not raw:
-        # Сработал safety-фильтр Gemini или пустой ответ
-        logger.warning("Gemini вернул пустой ответ")
         return AIResponse(
             action="CHAT",
             data={},
             reply="Не понял запрос, можешь переформулировать?",
         )
-
     return _parse_response(raw)
-
-
-async def transcribe_voice(
-    audio_bytes: bytes,
-    mime_type: str = "audio/ogg",
-) -> Optional[str]:
-    """
-    Транскрибирует голосовое сообщение через Gemini.
-    Telegram отдаёт voice в OGG/Opus, Gemini это поддерживает напрямую.
-    Возвращает распознанный текст или None при ошибке.
-    """
-    client = get_client()
-    prompt = (
-        "Это голосовое сообщение монтёра Казактелекома на русском языке. "
-        "Транскрибируй его точно, без комментариев и без перефразирования. "
-        "Сохраняй термины (кабель, патчкорд, акт, ОНТ, оптика и т. д.). "
-        "Верни ТОЛЬКО распознанный текст, ничего больше."
-    )
-    try:
-        response = await client.aio.models.generate_content(
-            model=MODEL,
-            contents=[{
-                "role": "user",
-                "parts": [
-                    {"inline_data": {"mime_type": mime_type, "data": audio_bytes}},
-                    {"text": prompt},
-                ],
-            }],
-            config=types.GenerateContentConfig(
-                max_output_tokens=1000,
-                temperature=0.1,
-            ),
-        )
-    except Exception as err:
-        if _is_rate_limit_error(err):
-            logger.warning("Gemini API rate limit при транскрипции голосового")
-        else:
-            logger.exception("Ошибка транскрипции голосового")
-        return None
-
-    text = (response.text or "").strip()
-    # Иногда модель оборачивает в кавычки — снимаем
-    text = text.strip('"').strip("«»").strip()
-    return text or None
-
-
-VISION_PROMPT = """На вход дано изображение. Скорее всего это скриншот заявки из CRM-системы Казактелекома («Единичное повреждение», «WFM», окно заявки и т. п.).
-
-Если это действительно скриншот CRM-заявки — извлеки данные и верни JSON:
-{
-  "is_crm_ticket": true,
-  "address": "адрес из поля «Адрес» (улица, дом, квартира) — обязательно",
-  "customer_name": "ФИО из поля «Владелец» или «Абонент»",
-  "customer_phone": "телефон из «Мобильный», «Контакты» — только цифры",
-  "crm_ticket_number": "номер заявки (большое число в заголовке или поле «Номер CRM»)",
-  "license_account": "номер из «Лицевой счёт»",
-  "problem_description": "описание проблемы — объедини текст из «Тип обращения» / «Заявлено» + комментарий оператора",
-  "visit_date": "ISO 8601 или null (если на скриншоте есть дата/время заявки)",
-  "is_repeat_visit": true | false
-}
-
-Если на изображении НЕ скриншот CRM-заявки (это фото работы, акта, кабеля, оборудования, обычный пейзаж) — верни:
-{
-  "is_crm_ticket": false
-}
-
-Возвращай строго JSON без обёрток.
-"""
-
-
-async def analyze_crm_photo(
-    image_bytes: bytes,
-    mime_type: str = "image/jpeg",
-) -> Optional[dict]:
-    """
-    Прогоняет изображение через Gemini Vision и пытается извлечь поля CRM-заявки.
-    Возвращает словарь с распознанными полями (без флага is_crm_ticket),
-    либо None — если не распознал или произошла ошибка.
-    """
-    client = get_client()
-    try:
-        response = await client.aio.models.generate_content(
-            model=MODEL,
-            contents=[{
-                "role": "user",
-                "parts": [
-                    {"inline_data": {
-                        "mime_type": mime_type,
-                        "data": image_bytes,
-                    }},
-                    {"text": VISION_PROMPT},
-                ],
-            }],
-            config=types.GenerateContentConfig(
-                response_mime_type="application/json",
-                max_output_tokens=MAX_TOKENS,
-                temperature=0.1,
-            ),
-        )
-    except Exception:
-        logger.exception("Ошибка вызова Gemini Vision")
-        return None
-
-    raw = (response.text or "").strip()
-    if not raw:
-        return None
-
-    text = raw
-    fence = re.match(r"^```(?:json)?\s*(.*?)\s*```$", text, re.DOTALL)
-    if fence:
-        text = fence.group(1).strip()
-
-    try:
-        data = json.loads(text)
-    except json.JSONDecodeError:
-        logger.warning("Vision вернул невалидный JSON: %s", raw[:300])
-        return None
-
-    if not isinstance(data, dict) or not data.get("is_crm_ticket"):
-        return None
-
-    # Возвращаем только полезные поля, без флага
-    data.pop("is_crm_ticket", None)
-    if not data.get("address"):
-        # Адрес обязателен, без него заявку не построить
-        logger.info("Vision не нашёл адрес на скриншоте")
-        return None
-    return data
 
 
 async def merge_ticket(user_text: str, pending: dict) -> dict:
@@ -339,34 +200,28 @@ async def merge_ticket(user_text: str, pending: dict) -> dict:
 
     client = get_client()
     try:
-        response = await client.aio.models.generate_content(
-            model=MODEL,
-            contents=[{"role": "user", "parts": [{"text": user_prompt}]}],
-            config=types.GenerateContentConfig(
-                system_instruction=merge_system,
-                response_mime_type="application/json",
-                max_output_tokens=MAX_TOKENS,
-                temperature=0.2,
-            ),
+        response = await client.chat.completions.create(
+            model=CHAT_MODEL,
+            messages=[
+                {"role": "system", "content": merge_system},
+                {"role": "user", "content": user_prompt},
+            ],
+            response_format={"type": "json_object"},
+            max_tokens=MAX_TOKENS,
+            temperature=0.2,
         )
     except Exception as err:
         if _is_rate_limit_error(err):
-            logger.warning("Gemini API rate limit при merge_ticket")
+            logger.warning("OpenAI API rate limit при merge_ticket")
         else:
             logger.exception("Ошибка merge_ticket")
         return pending
 
-    raw = (response.text or "").strip()
+    raw = (response.choices[0].message.content or "").strip()
     if not raw:
         return pending
-
-    text = raw
-    fence = re.match(r"^```(?:json)?\s*(.*?)\s*```$", text, re.DOTALL)
-    if fence:
-        text = fence.group(1).strip()
-
     try:
-        merged = json.loads(text)
+        merged = json.loads(raw)
         if isinstance(merged, dict) and "address" in merged:
             return merged
         return pending
@@ -375,8 +230,124 @@ async def merge_ticket(user_text: str, pending: dict) -> dict:
         return pending
 
 
+async def transcribe_voice(
+    audio_bytes: bytes,
+    mime_type: str = "audio/ogg",
+) -> Optional[str]:
+    """
+    Транскрибирует голосовое сообщение через OpenAI Whisper.
+    Telegram отдаёт voice в OGG/Opus — Whisper это поддерживает.
+    Возвращает распознанный текст или None при ошибке.
+    """
+    client = get_client()
+
+    # Whisper SDK принимает файл — обёртываем bytes в BytesIO с именем
+    buf = io.BytesIO(audio_bytes)
+    buf.name = "voice.ogg"  # расширение важно для определения формата
+
+    try:
+        response = await client.audio.transcriptions.create(
+            model=WHISPER_MODEL,
+            file=buf,
+            language="ru",
+        )
+    except Exception as err:
+        if _is_rate_limit_error(err):
+            logger.warning("OpenAI rate limit при транскрипции голосового")
+        else:
+            logger.exception("Ошибка транскрипции голосового")
+        return None
+
+    text = (response.text or "").strip()
+    # Иногда модель оборачивает в кавычки — снимаем
+    text = text.strip('"').strip("«»").strip()
+    return text or None
+
+
+VISION_PROMPT = """На вход дано изображение. Скорее всего это скриншот заявки из CRM-системы Казактелекома («Единичное повреждение», «WFM», окно заявки и т. п.).
+
+Если это действительно скриншот CRM-заявки — извлеки данные и верни JSON:
+{
+  "is_crm_ticket": true,
+  "address": "адрес из поля «Адрес» (улица, дом, квартира) — обязательно",
+  "customer_name": "ФИО из поля «Владелец» или «Абонент»",
+  "customer_phone": "телефон из «Мобильный», «Контакты» — только цифры",
+  "crm_ticket_number": "номер заявки (большое число в заголовке или поле «Номер CRM»)",
+  "license_account": "номер из «Лицевой счёт»",
+  "problem_description": "описание проблемы — объедини текст из «Тип обращения» / «Заявлено» + комментарий оператора",
+  "visit_date": "ISO 8601 или null (если на скриншоте есть дата/время заявки)",
+  "is_repeat_visit": true | false
+}
+
+Если на изображении НЕ скриншот CRM-заявки (это фото работы, акта, кабеля, оборудования, обычный пейзаж) — верни:
+{
+  "is_crm_ticket": false
+}
+
+Возвращай строго JSON без обёрток.
+"""
+
+
+async def analyze_crm_photo(
+    image_bytes: bytes,
+    mime_type: str = "image/jpeg",
+) -> Optional[dict]:
+    """
+    Vision-анализ через OpenAI gpt-4o-mini. Извлекает поля CRM-заявки.
+    None — если на фото не CRM, или ошибка.
+    """
+    b64 = base64.b64encode(image_bytes).decode("ascii")
+
+    client = get_client()
+    try:
+        response = await client.chat.completions.create(
+            model=VISION_MODEL,
+            messages=[{
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": VISION_PROMPT},
+                    {
+                        "type": "image_url",
+                        "image_url": {
+                            "url": f"data:{mime_type};base64,{b64}",
+                            "detail": "high",
+                        },
+                    },
+                ],
+            }],
+            response_format={"type": "json_object"},
+            max_tokens=MAX_TOKENS,
+            temperature=0.1,
+        )
+    except Exception as err:
+        if _is_rate_limit_error(err):
+            logger.warning("OpenAI rate limit при Vision")
+        else:
+            logger.exception("Ошибка вызова OpenAI Vision")
+        return None
+
+    raw = (response.choices[0].message.content or "").strip()
+    if not raw:
+        return None
+
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError:
+        logger.warning("Vision вернул невалидный JSON: %s", raw[:300])
+        return None
+
+    if not isinstance(data, dict) or not data.get("is_crm_ticket"):
+        return None
+
+    data.pop("is_crm_ticket", None)
+    if not data.get("address"):
+        logger.info("Vision не нашёл адрес на скриншоте")
+        return None
+    return data
+
+
 def _parse_response(raw: str) -> AIResponse:
-    """Парсит JSON-ответ Gemini, мягко обрабатывая возможные обёртки."""
+    """Парсит JSON-ответ OpenAI, мягко обрабатывая возможные обёртки."""
     text = raw.strip()
 
     # На случай, если модель всё же обернёт в ```json ... ```
@@ -388,12 +359,21 @@ def _parse_response(raw: str) -> AIResponse:
         data = json.loads(text)
         return AIResponse.model_validate(data)
     except (json.JSONDecodeError, ValueError):
-        logger.warning("Не удалось распарсить JSON от Gemini: %s", raw[:500])
+        logger.warning("Не удалось распарсить JSON от OpenAI: %s", raw[:500])
         return AIResponse(
             action="CHAT",
             data={},
             reply=raw or "Не понял запрос, можешь переформулировать?",
         )
+
+
+def _weekday_ru(dt: datetime) -> str:
+    """День недели по-русски."""
+    names = [
+        "понедельник", "вторник", "среда", "четверг",
+        "пятница", "суббота", "воскресенье",
+    ]
+    return names[dt.weekday()]
 
 
 def _format_open_tickets_context(tickets: list[dict]) -> str:
@@ -424,18 +404,9 @@ def _format_open_tickets_context(tickets: list[dict]) -> str:
     return "\n".join(lines)
 
 
-def _weekday_ru(dt: datetime) -> str:
-    """День недели по-русски."""
-    names = [
-        "понедельник", "вторник", "среда", "четверг",
-        "пятница", "суббота", "воскресенье",
-    ]
-    return names[dt.weekday()]
-
-
 def _sanitize_history(history: list[dict]) -> list[dict]:
     """
-    Готовит историю для Gemini:
+    Готовит историю для OpenAI:
     - выкидывает пустые сообщения,
     - схлопывает подряд идущие одинаковые роли,
     - гарантирует, что первая роль — 'user'.
