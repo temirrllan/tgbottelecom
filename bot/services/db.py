@@ -298,6 +298,74 @@ async def get_last_ticket_today(user_id: int) -> Optional[Ticket]:
     )
 
 
+async def list_open_tickets(user_id: int, limit: int = 50) -> list[Ticket]:
+    """
+    Заявки без проставленного work_done — то, что монтёру ещё предстоит сделать.
+    Сортировка по visit_date по возрастанию (старые сверху).
+    """
+    pool = _get_pool()
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            """
+            SELECT * FROM tickets
+            WHERE user_id = $1
+              AND (work_done IS NULL OR work_done = '')
+            ORDER BY visit_date
+            LIMIT $2
+            """,
+            user_id, limit,
+        )
+        if not rows:
+            return []
+        ticket_ids = [r["id"] for r in rows]
+        materials = await _fetch_materials(conn, ticket_ids)
+        photos = await _fetch_photos(conn, ticket_ids)
+    return [
+        _row_to_ticket(r, materials.get(r["id"], []), photos.get(r["id"], []))
+        for r in rows
+    ]
+
+
+# --- Кэш геокодинга --------------------------------------------------------
+
+async def get_cached_geocode(address: str) -> Optional[dict]:
+    """Возвращает кэшированные координаты адреса или None."""
+    pool = _get_pool()
+    row = await pool.fetchrow(
+        "SELECT lat, lng, display_name FROM address_geocache WHERE address = $1",
+        address,
+    )
+    if not row:
+        return None
+    return {
+        "lat": float(row["lat"]),
+        "lng": float(row["lng"]),
+        "display_name": row["display_name"] or "",
+    }
+
+
+async def save_cached_geocode(
+    address: str,
+    lat: float,
+    lng: float,
+    display_name: str = "",
+) -> None:
+    """Сохраняет координаты адреса в кэш."""
+    pool = _get_pool()
+    await pool.execute(
+        """
+        INSERT INTO address_geocache (address, lat, lng, display_name)
+        VALUES ($1, $2, $3, $4)
+        ON CONFLICT (address) DO UPDATE SET
+            lat = EXCLUDED.lat,
+            lng = EXCLUDED.lng,
+            display_name = EXCLUDED.display_name,
+            geocoded_at = NOW()
+        """,
+        address, lat, lng, display_name,
+    )
+
+
 async def list_tickets(
     user_id: int,
     period: Optional[str] = None,

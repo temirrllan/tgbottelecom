@@ -57,6 +57,15 @@ CREATE TABLE IF NOT EXISTS ticket_photos (
 
 CREATE INDEX IF NOT EXISTS idx_ticket_photos_ticket_id ON ticket_photos(ticket_id);
 
+-- Кэш геокодинга адресов (общий для всех монтёров)
+CREATE TABLE IF NOT EXISTS address_geocache (
+    address TEXT PRIMARY KEY,
+    lat DOUBLE PRECISION NOT NULL,
+    lng DOUBLE PRECISION NOT NULL,
+    display_name TEXT,
+    geocoded_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
 -- История переписки для контекста ИИ
 CREATE TABLE IF NOT EXISTS conversation_history (
     id BIGSERIAL PRIMARY KEY,

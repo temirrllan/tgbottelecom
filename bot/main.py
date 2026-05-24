@@ -13,7 +13,7 @@ from aiogram.enums import ParseMode
 from aiogram.fsm.storage.memory import MemoryStorage
 from dotenv import load_dotenv
 
-from bot.handlers import chat, commands, confirm, photo, stats, voice
+from bot.handlers import chat, commands, confirm, photo, route, stats, voice
 from bot.handlers.stats import build_stats_text
 from bot.services import db
 from bot.services.tz import LOCAL_TZ, local_now
@@ -122,13 +122,16 @@ async def main() -> None:
     dp = Dispatcher(storage=MemoryStorage())
 
     # Порядок важен:
-    #   1) команды (включая /stats),
-    #   2) подтверждение заявки (перехватывает текст в FSM-состоянии),
-    #   3) фотографии,
-    #   4) голосовые сообщения,
-    #   5) свободный чат с ИИ.
+    #   1) команды (/start, /help, /today …),
+    #   2) статистика,
+    #   3) маршрут (включая F.location),
+    #   4) подтверждение заявки (перехватывает текст в FSM-состоянии),
+    #   5) фотографии,
+    #   6) голосовые сообщения,
+    #   7) свободный чат с ИИ.
     dp.include_router(commands.router)
     dp.include_router(stats.router)
+    dp.include_router(route.router)
     dp.include_router(confirm.router)
     dp.include_router(photo.router)
     dp.include_router(voice.router)
