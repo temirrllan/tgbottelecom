@@ -350,6 +350,191 @@ async def list_tickets(
     ]
 
 
+async def count_tickets_since(user_id: int, since: datetime) -> int:
+    """Количество заявок за период [since, now]."""
+    pool = _get_pool()
+    val = await pool.fetchval(
+        "SELECT COUNT(*) FROM tickets WHERE user_id = $1 AND visit_date >= $2",
+        user_id, since,
+    )
+    return int(val or 0)
+
+
+async def count_tickets_between(
+    user_id: int, since: datetime, until: datetime,
+) -> int:
+    """Количество заявок в интервале [since, until)."""
+    pool = _get_pool()
+    val = await pool.fetchval(
+        """
+        SELECT COUNT(*) FROM tickets
+        WHERE user_id = $1
+          AND visit_date >= $2
+          AND visit_date < $3
+        """,
+        user_id, since, until,
+    )
+    return int(val or 0)
+
+
+async def count_repeats_since(user_id: int, since: datetime) -> int:
+    """Сколько заявок было отмечено как повторные."""
+    pool = _get_pool()
+    val = await pool.fetchval(
+        """
+        SELECT COUNT(*) FROM tickets
+        WHERE user_id = $1
+          AND visit_date >= $2
+          AND is_repeat_visit
+        """,
+        user_id, since,
+    )
+    return int(val or 0)
+
+
+async def count_with_photos_since(user_id: int, since: datetime) -> int:
+    """Заявок с фотографиями за период."""
+    pool = _get_pool()
+    val = await pool.fetchval(
+        """
+        SELECT COUNT(DISTINCT t.id) FROM tickets t
+        WHERE t.user_id = $1
+          AND t.visit_date >= $2
+          AND EXISTS (SELECT 1 FROM ticket_photos p WHERE p.ticket_id = t.id)
+        """,
+        user_id, since,
+    )
+    return int(val or 0)
+
+
+async def count_with_act_since(user_id: int, since: datetime) -> int:
+    """Заявок с проставленным номером акта."""
+    pool = _get_pool()
+    val = await pool.fetchval(
+        """
+        SELECT COUNT(*) FROM tickets
+        WHERE user_id = $1
+          AND visit_date >= $2
+          AND act_number IS NOT NULL
+          AND act_number != ''
+        """,
+        user_id, since,
+    )
+    return int(val or 0)
+
+
+async def hour_distribution_since(
+    user_id: int, since: datetime,
+) -> list[dict]:
+    """Распределение заявок по часам суток."""
+    pool = _get_pool()
+    rows = await pool.fetch(
+        """
+        SELECT EXTRACT(HOUR FROM visit_date)::int AS hour,
+               COUNT(*) AS cnt
+        FROM tickets
+        WHERE user_id = $1 AND visit_date >= $2
+        GROUP BY hour
+        ORDER BY hour
+        """,
+        user_id, since,
+    )
+    return [{"hour": int(r["hour"]), "count": int(r["cnt"])} for r in rows]
+
+
+async def top_addresses_since(
+    user_id: int, since: datetime, limit: int = 5,
+) -> list[dict]:
+    """Самые частые адреса за период."""
+    pool = _get_pool()
+    rows = await pool.fetch(
+        """
+        SELECT address, COUNT(*) AS cnt
+        FROM tickets
+        WHERE user_id = $1 AND visit_date >= $2
+        GROUP BY address
+        HAVING COUNT(*) > 0
+        ORDER BY cnt DESC, address
+        LIMIT $3
+        """,
+        user_id, since, limit,
+    )
+    return [{"address": r["address"], "count": int(r["cnt"])} for r in rows]
+
+
+async def top_materials_since(
+    user_id: int, since: datetime, limit: int = 10,
+) -> list[dict]:
+    """Топ материалов за период."""
+    pool = _get_pool()
+    rows = await pool.fetch(
+        """
+        SELECT m.name, m.unit, SUM(m.quantity) AS total
+        FROM materials m
+        JOIN tickets t ON t.id = m.ticket_id
+        WHERE t.user_id = $1 AND t.visit_date >= $2
+        GROUP BY m.name, m.unit
+        ORDER BY total DESC
+        LIMIT $3
+        """,
+        user_id, since, limit,
+    )
+    return [
+        {"name": r["name"], "unit": r["unit"], "total": r["total"]}
+        for r in rows
+    ]
+
+
+async def count_recent_visits_at_address(
+    user_id: int,
+    address: str,
+    days: int = 30,
+    exclude_ticket_id: Optional[int] = None,
+) -> int:
+    """
+    Сколько раз монтёр уже выезжал по похожему адресу за последние N дней.
+    Сравнение нечувствительно к регистру; ищем по ключевой части адреса.
+    """
+    pool = _get_pool()
+    if not address or not address.strip():
+        return 0
+
+    key = _address_key(address)
+    query = """
+        SELECT COUNT(*) FROM tickets
+        WHERE user_id = $1
+          AND address ILIKE $2
+          AND visit_date >= NOW() - $3::interval
+    """
+    args: list = [user_id, f"%{key}%", timedelta(days=days)]
+    if exclude_ticket_id is not None:
+        query += " AND id <> $4"
+        args.append(exclude_ticket_id)
+    val = await pool.fetchval(query, *args)
+    return int(val or 0)
+
+
+def _address_key(address: str) -> str:
+    """
+    Достаёт «опознавательную» часть адреса:
+    самое длинное буквенное слово (4+ символа) + первое число после него.
+    Например, «ул. Абая 45 кв 12» → «Абая 45».
+    """
+    import re
+    matches = list(re.finditer(r"[А-ЯЁA-Zа-яёa-z\-]{4,}", address))
+    if not matches:
+        return address.strip()[:20]
+    # Берём самое длинное слово
+    word_match = max(matches, key=lambda m: len(m.group()))
+    word = word_match.group()
+    # Ищем первое число после этого слова
+    tail = address[word_match.end():]
+    num_match = re.search(r"\d+", tail)
+    if num_match:
+        return f"{word} {num_match.group()}"
+    return word
+
+
 async def materials_summary(
     user_id: int,
     period: str = "month",

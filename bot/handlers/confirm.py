@@ -205,7 +205,34 @@ async def on_save(cb: CallbackQuery, state: FSMContext) -> None:
     if saved is not None:
         text += "\n\n" + format_ticket(saved)
     await cb.message.answer(text)
+
+    # Алерт повторного визита: бот сам считает прошлые выезды на этот адрес
+    if saved is not None:
+        prev_visits = await db.count_recent_visits_at_address(
+            cb.from_user.id,
+            saved.address,
+            days=30,
+            exclude_ticket_id=saved.id,
+        )
+        if prev_visits > 0 and not saved.is_repeat_visit:
+            await cb.message.answer(
+                f"⚠️ <b>Внимание:</b> ты уже был на этом адресе "
+                f"{prev_visits} {_visits_word(prev_visits)} за 30 дней. "
+                f"Возможно, это повторная заявка — посмотри /find {_e(saved.address[:30])}"
+            )
+
     await cb.answer("Сохранил")
+
+
+def _visits_word(n: int) -> str:
+    """Склонение «раз»."""
+    n10 = n % 10
+    n100 = n % 100
+    if n10 == 1 and n100 != 11:
+        return "раз"
+    if 2 <= n10 <= 4 and not (12 <= n100 <= 14):
+        return "раза"
+    return "раз"
 
 
 # --- Кнопка «Отмена» --------------------------------------------------------

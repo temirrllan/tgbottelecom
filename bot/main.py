@@ -5,6 +5,7 @@ import asyncio
 import logging
 import os
 from contextlib import suppress
+from datetime import datetime
 
 from aiogram import Bot, Dispatcher
 from aiogram.client.default import DefaultBotProperties
@@ -12,7 +13,8 @@ from aiogram.enums import ParseMode
 from aiogram.fsm.storage.memory import MemoryStorage
 from dotenv import load_dotenv
 
-from bot.handlers import chat, commands, confirm, photo, voice
+from bot.handlers import chat, commands, confirm, photo, stats, voice
+from bot.handlers.stats import build_stats_text
 from bot.services import db
 
 logger = logging.getLogger(__name__)
@@ -22,6 +24,54 @@ REMINDER_TEXT = (
     "⏰ Не забудь зафиксировать заявки! "
     "Просто напиши, что сделал — я сохраню."
 )
+
+
+async def evening_summary_loop(bot: Bot) -> None:
+    """
+    Раз в день в 19:00 (пн–сб) рассылает вечернюю сводку каждому активному монтёру:
+    сколько заявок закрыл, сколько материалов потратил.
+    """
+    summary_hour = int(os.getenv("EVENING_SUMMARY_HOUR", "19"))
+    fired_dates: set = set()
+
+    while True:
+        try:
+            now = datetime.now().astimezone()
+            today = now.date()
+            # Чистим старые отметки, оставляем только сегодняшнюю
+            fired_dates = {d for d in fired_dates if d == today}
+
+            in_window = (
+                now.weekday() < 6
+                and now.hour == summary_hour
+                and now.minute < 10  # 10-минутное окно срабатывания
+                and today not in fired_dates
+            )
+            if in_window:
+                fired_dates.add(today)
+                await _send_evening_summaries(bot)
+        except Exception:
+            logger.exception("Ошибка в цикле вечерней сводки")
+
+        await asyncio.sleep(60)
+
+
+async def _send_evening_summaries(bot: Bot) -> None:
+    """Рассылает сводку всем монтёрам, у которых сегодня была активность."""
+    pool = db._get_pool()
+    rows = await pool.fetch(
+        """
+        SELECT DISTINCT user_id FROM tickets
+        WHERE visit_date::date = CURRENT_DATE
+        """
+    )
+    for row in rows:
+        uid = int(row["user_id"])
+        try:
+            text = await build_stats_text(uid, "today")
+            await bot.send_message(uid, "🌆 <b>Вечерняя сводка</b>\n\n" + text)
+        except Exception as e:
+            logger.warning("Не удалось отправить сводку %s: %s", uid, e)
 
 
 async def reminder_loop(bot: Bot) -> None:
@@ -69,12 +119,13 @@ async def main() -> None:
     dp = Dispatcher(storage=MemoryStorage())
 
     # Порядок важен:
-    #   1) команды,
+    #   1) команды (включая /stats),
     #   2) подтверждение заявки (перехватывает текст в FSM-состоянии),
     #   3) фотографии,
     #   4) голосовые сообщения,
     #   5) свободный чат с ИИ.
     dp.include_router(commands.router)
+    dp.include_router(stats.router)
     dp.include_router(confirm.router)
     dp.include_router(photo.router)
     dp.include_router(voice.router)
@@ -83,16 +134,18 @@ async def main() -> None:
     # Инициализируем БД и применяем миграции
     await db.init_db()
 
-    # Запускаем фоновый таск напоминаний
+    # Фоновые таски: напоминания и вечерняя сводка
     reminder_task = asyncio.create_task(reminder_loop(bot))
+    evening_task = asyncio.create_task(evening_summary_loop(bot))
 
     try:
         logger.info("Бот стартует...")
         await dp.start_polling(bot, allowed_updates=dp.resolve_used_update_types())
     finally:
-        reminder_task.cancel()
-        with suppress(asyncio.CancelledError):
-            await reminder_task
+        for task in (reminder_task, evening_task):
+            task.cancel()
+            with suppress(asyncio.CancelledError):
+                await task
         await db.close_db()
         await bot.session.close()
 
