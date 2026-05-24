@@ -13,29 +13,46 @@ from bot.services.formatting import (
     format_materials_summary,
     format_tickets_list,
 )
+from bot.services.roles import is_dispatcher
 
 logger = logging.getLogger(__name__)
 router = Router(name="commands")
 
 
-WELCOME_TEXT = (
+WELCOME_MONTEUR = (
     "👋 Привет! Я — ИИ-ассистент монтёра Казактелекома.\n\n"
     "Просто пиши мне в свободной форме, что сделал — я сам разберу и сохраню:\n"
     "<i>«Был на Абая 45 кв 12, заменил кабель 10м, акт №321»</i>\n\n"
     "🎤 Можно говорить голосом — я распознаю.\n"
-    "📷 Можно слать скриншот заявки из CRM — извлеку данные сам.\n\n"
+    "📷 Можно слать фото — приложу к заявке.\n\n"
     "А ещё можно спрашивать про свои заявки:\n"
     "<i>«Что я делал сегодня?», «Сколько кабеля потратил за месяц?»</i>\n\n"
     "Команды:\n"
-    "/help — список возможностей\n"
     "/today — заявки за сегодня\n"
     "/week — заявки за неделю\n"
     "/month — заявки за месяц + материалы\n"
-    "/stats [today|week|month] — статистика и графики\n"
+    "/stats — статистика и графики\n"
     "/route — маршрут по открытым заявкам\n"
     "/find [адрес] — поиск\n"
     "/edit — редактировать последнюю заявку\n"
     "/photos [id] — фото заявки\n"
+    "/help — справка\n"
+    "/cancel — отмена"
+)
+
+WELCOME_DISPATCHER = (
+    "👋 Привет! Ты КРОСС в системе бота.\n\n"
+    "Тут ты создаёшь заявки и распределяешь их монтёрам.\n\n"
+    "📝 Чтобы создать заявку, просто опиши её:\n"
+    "<i>«Абилов, 7029583619, ул. Беркимбаева 102/13, нет интернета»</i>\n\n"
+    "После превью бот спросит, кому из монтёров отправить — "
+    "покажет всех с их загрузкой.\n\n"
+    "Команды:\n"
+    "/new — подсказка по созданию заявки\n"
+    "/team — список монтёров и загрузка\n"
+    "/inbox — мои назначенные заявки\n"
+    "/find [адрес] — поиск по адресу\n"
+    "/help — справка\n"
     "/cancel — отмена"
 )
 
@@ -75,7 +92,7 @@ HELP_TEXT = (
 
 @router.message(CommandStart())
 async def cmd_start(message: Message, state: FSMContext) -> None:
-    """/start — регистрация монтёра."""
+    """/start — регистрация пользователя."""
     await state.clear()
     user = message.from_user
     if user is None:
@@ -85,11 +102,15 @@ async def cmd_start(message: Message, state: FSMContext) -> None:
         username=user.username,
         full_name=user.full_name,
     )
-    await message.answer(WELCOME_TEXT)
+    welcome = WELCOME_DISPATCHER if is_dispatcher(user.id) else WELCOME_MONTEUR
+    await message.answer(welcome)
 
 
 @router.message(Command("help"))
 async def cmd_help(message: Message) -> None:
+    if message.from_user and is_dispatcher(message.from_user.id):
+        await message.answer(WELCOME_DISPATCHER)
+        return
     await message.answer(HELP_TEXT)
 
 

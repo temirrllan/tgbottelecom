@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import logging
 from html import escape
+from typing import Optional
 
 from aiogram import F, Router
 from aiogram.exceptions import TelegramBadRequest
@@ -19,9 +20,10 @@ from aiogram.types import (
 )
 from pydantic import ValidationError
 
-from bot.models.schemas import TicketIn
+from bot.models.schemas import Ticket, TicketIn
 from bot.services import ai, db
 from bot.services.formatting import format_ticket
+from bot.services.roles import is_dispatcher
 from bot.services.tz import to_local
 
 logger = logging.getLogger(__name__)
@@ -41,6 +43,11 @@ class TicketConfirm(StatesGroup):
 class TicketCB(CallbackData, prefix="tc"):
     """Действие пользователя по кнопке."""
     action: str  # "save" | "cancel" | "edit"
+
+
+class AssignCB(CallbackData, prefix="as"):
+    """Выбор монтёра-исполнителя из меню КРОСС."""
+    monteur_id: int  # 0 — отмена
 
 
 def _keyboard() -> InlineKeyboardMarkup:
@@ -188,6 +195,12 @@ async def on_save(cb: CallbackQuery, state: FSMContext) -> None:
         await state.clear()
         return
 
+    # КРОСС: вместо мгновенной записи показываем выбор монтёра-исполнителя.
+    if is_dispatcher(cb.from_user.id):
+        await _show_monteur_picker(cb, state)
+        return
+
+    # Монтёр: сохраняет на себя
     ticket_id = await db.create_ticket(cb.from_user.id, ticket_in)
     saved = await db.get_ticket(cb.from_user.id, ticket_id)
     await state.clear()
@@ -223,6 +236,161 @@ async def on_save(cb: CallbackQuery, state: FSMContext) -> None:
             )
 
     await cb.answer("Сохранил")
+
+
+# --- Выбор монтёра для КРОСС ------------------------------------------------
+
+async def _show_monteur_picker(cb: CallbackQuery, state: FSMContext) -> None:
+    """Показывает inline-клавиатуру со списком монтёров и их загрузкой."""
+    from bot.services.roles import dispatcher_ids
+    monteurs = await db.list_users_except(dispatcher_ids())
+    if not monteurs:
+        await cb.answer(
+            "Нет ни одного монтёра в системе. "
+            "Попроси их написать боту /start.",
+            show_alert=True,
+        )
+        return
+
+    rows: list[list[InlineKeyboardButton]] = []
+    current_row: list[InlineKeyboardButton] = []
+    for m in monteurs:
+        open_count = await db.count_open_tickets_for(m["id"])
+        load = (
+            "свободен" if open_count == 0
+            else f"{open_count} откр."
+        )
+        label = f"👷 {m['full_name']} • {load}"
+        btn = InlineKeyboardButton(
+            text=label,
+            callback_data=AssignCB(monteur_id=m["id"]).pack(),
+        )
+        current_row.append(btn)
+        if len(current_row) == 1:  # одна кнопка в ряд — широкий лейбл
+            rows.append(current_row)
+            current_row = []
+    if current_row:
+        rows.append(current_row)
+    rows.append([
+        InlineKeyboardButton(
+            text="❌ Отмена",
+            callback_data=AssignCB(monteur_id=0).pack(),
+        ),
+    ])
+
+    try:
+        await cb.message.edit_reply_markup(reply_markup=None)
+    except TelegramBadRequest:
+        pass
+    await cb.message.answer(
+        "👥 <b>Кому отправить заявку?</b>",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=rows),
+    )
+    await cb.answer()
+
+
+@router.callback_query(AssignCB.filter())
+async def on_assign(
+    cb: CallbackQuery,
+    callback_data: AssignCB,
+    state: FSMContext,
+) -> None:
+    """Обработка выбора монтёра-исполнителя."""
+    if cb.from_user is None or cb.message is None:
+        await cb.answer()
+        return
+
+    if callback_data.monteur_id == 0:
+        await state.clear()
+        try:
+            await cb.message.edit_reply_markup(reply_markup=None)
+        except TelegramBadRequest:
+            pass
+        await cb.message.answer("❌ Назначение отменено.")
+        await cb.answer("Отмена")
+        return
+
+    data = await state.get_data()
+    pending = data.get("pending_ticket")
+    if not pending:
+        await cb.answer("Черновик потерян", show_alert=True)
+        await state.clear()
+        return
+
+    try:
+        ticket_in = TicketIn.model_validate(pending)
+    except ValidationError:
+        await cb.answer("Данные повреждены", show_alert=True)
+        await state.clear()
+        return
+
+    monteur = await db.get_user(callback_data.monteur_id)
+    if monteur is None:
+        await cb.answer("Монтёр не найден", show_alert=True)
+        return
+
+    # Создаём заявку: исполнитель — выбранный монтёр, автор — КРОСС
+    ticket_id = await db.create_ticket(
+        user_id=monteur["id"],
+        data=ticket_in,
+        created_by_id=cb.from_user.id,
+    )
+    saved = await db.get_ticket(monteur["id"], ticket_id)
+    dispatcher = await db.get_user(cb.from_user.id)
+    await state.clear()
+
+    # Убираем кнопки выбора
+    try:
+        await cb.message.edit_reply_markup(reply_markup=None)
+    except TelegramBadRequest:
+        pass
+
+    # Подтверждение КРОСС-у
+    await cb.message.answer(
+        f"✅ Заявка #{ticket_id} назначена монтёру "
+        f"<b>{_e(monteur['full_name'])}</b>."
+    )
+    await cb.answer("Отправил монтёру")
+
+    # Пуш монтёру
+    if saved is not None and cb.bot is not None:
+        await notify_monteur(cb.bot, monteur["id"], saved, dispatcher)
+
+
+async def notify_monteur(bot, monteur_id: int, ticket: Ticket, dispatcher: Optional[dict]) -> None:
+    """Шлёт монтёру уведомление о новой назначенной заявке."""
+    who = (
+        f"от <b>{_e(dispatcher['full_name'])}</b> (КРОСС)"
+        if dispatcher else "от КРОСС"
+    )
+    text = f"🆕 <b>Новая заявка {who}</b>\n\n" + format_ticket(ticket)
+    try:
+        # Сначала фото, если есть
+        if ticket.photos:
+            await send_photos_to_chat(bot, monteur_id, ticket.photos)
+        await bot.send_message(monteur_id, text)
+    except Exception as e:
+        logger.warning("Не удалось доставить заявку %s монтёру %s: %s",
+                       ticket.id, monteur_id, e)
+
+
+async def send_photos_to_chat(bot, chat_id: int, file_ids: list[str]) -> None:
+    """Отправляет фото в произвольный чат (для уведомлений)."""
+    if not file_ids:
+        return
+    if len(file_ids) == 1:
+        try:
+            await bot.send_photo(chat_id, file_ids[0])
+        except TelegramBadRequest:
+            logger.exception("Не удалось отправить фото в %s", chat_id)
+        return
+    for chunk_start in range(0, len(file_ids), 10):
+        chunk = file_ids[chunk_start:chunk_start + 10]
+        media = [InputMediaPhoto(media=fid) for fid in chunk]
+        try:
+            await bot.send_media_group(chat_id, media=media)
+        except TelegramBadRequest:
+            logger.exception("Не удалось отправить альбом в %s", chat_id)
 
 
 def _visits_word(n: int) -> str:

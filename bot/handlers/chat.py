@@ -156,20 +156,29 @@ async def _handle_edit(message: Message, ai_response: AIResponse) -> None:
         if last is None:
             await message.answer(
                 "Не нашёл сегодняшней заявки для редактирования. "
-                "Менять можно только заявки за сегодня."
+                "Укажи номер: «по 123 ...»"
             )
             return
         ticket_id = last.id
 
-    # Проверяем, что заявка действительно сегодняшняя
     existing = await db.get_ticket(user_id, ticket_id)
+    # Если по id бота не нашли — может, это длинный номер CRM
+    if existing is None:
+        existing = await db.find_ticket_by_crm(user_id, str(ticket_id))
+        if existing is not None:
+            ticket_id = existing.id
     if existing is None:
         await message.answer("Не нашёл такой заявки.")
         return
+    # Правило: редактировать можно либо сегодняшние, либо ещё «открытые»
+    # (без work_done). Это позволяет закрывать назначенные КРОСС-ом заявки
+    # на следующий день.
     from bot.services.tz import to_local
-    if to_local(existing.created_at).date() != local_now().date():
+    same_day = to_local(existing.created_at).date() == local_now().date()
+    is_open = not existing.work_done
+    if not same_day and not is_open:
         await message.answer(
-            "Редактировать можно только заявки, созданные сегодня."
+            "Закрытые заявки прошлых дней редактировать нельзя."
         )
         return
 
@@ -188,6 +197,28 @@ async def _handle_edit(message: Message, ai_response: AIResponse) -> None:
     updated = await db.get_ticket(user_id, ticket_id)
     reply = ai_response.reply or "✏️ Изменил."
     await message.answer(f"{reply}\n\n{format_ticket(updated)}")
+
+    # Если заявку создавал КРОСС и сейчас монтёр впервые проставил work_done,
+    # это значит «закрытие» — уведомим КРОСС.
+    if (
+        updated is not None
+        and updated.created_by_id
+        and updated.created_by_id != user_id
+        and not existing.work_done
+        and updated.work_done
+        and message.bot is not None
+    ):
+        monteur = await db.get_user(user_id)
+        monteur_name = (monteur or {}).get("full_name", f"монтёр {user_id}")
+        try:
+            await message.bot.send_message(
+                updated.created_by_id,
+                f"✅ <b>{monteur_name}</b> закрыл заявку #{updated.id}\n\n"
+                + format_ticket(updated),
+            )
+        except Exception as e:
+            logger.warning("Не удалось уведомить КРОСС %s: %s",
+                           updated.created_by_id, e)
 
 
 # --- Утилиты ----------------------------------------------------------------

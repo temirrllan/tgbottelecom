@@ -120,8 +120,15 @@ async def get_idle_users(
 _normalize_dt = normalize_for_db
 
 
-async def create_ticket(user_id: int, data: TicketIn) -> int:
-    """Создаёт заявку с материалами и фото в одной транзакции, возвращает id."""
+async def create_ticket(
+    user_id: int,
+    data: TicketIn,
+    created_by_id: Optional[int] = None,
+) -> int:
+    """
+    Создаёт заявку с материалами и фото в одной транзакции, возвращает id.
+    user_id — исполнитель (монтёр), created_by_id — кто создал (КРОСС или None).
+    """
     pool = _get_pool()
     async with pool.acquire() as conn:
         async with conn.transaction():
@@ -129,14 +136,15 @@ async def create_ticket(user_id: int, data: TicketIn) -> int:
             ticket_id = await conn.fetchval(
                 """
                 INSERT INTO tickets (
-                    user_id, address, problem_description, work_done,
+                    user_id, created_by_id, address, problem_description, work_done,
                     visit_date, is_repeat_visit, act_number,
                     customer_name, customer_phone, crm_ticket_number, license_account
                 )
-                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
                 RETURNING id
                 """,
                 user_id,
+                created_by_id,
                 data.address,
                 data.problem_description,
                 data.work_done,
@@ -272,6 +280,30 @@ async def get_ticket(user_id: int, ticket_id: int) -> Optional[Ticket]:
     )
 
 
+async def find_ticket_by_crm(user_id: int, crm_number: str) -> Optional[Ticket]:
+    """Поиск заявки по номеру CRM (для упоминаний типа «по 2368874...»)."""
+    pool = _get_pool()
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            """
+            SELECT * FROM tickets
+            WHERE user_id = $1 AND crm_ticket_number = $2
+            ORDER BY created_at DESC
+            LIMIT 1
+            """,
+            user_id, crm_number,
+        )
+        if not row:
+            return None
+        materials = await _fetch_materials(conn, [row["id"]])
+        photos = await _fetch_photos(conn, [row["id"]])
+    return _row_to_ticket(
+        row,
+        materials.get(row["id"], []),
+        photos.get(row["id"], []),
+    )
+
+
 async def get_last_ticket_today(user_id: int) -> Optional[Ticket]:
     """Последняя заявка монтёра, созданная сегодня (по локальной TZ)."""
     pool = _get_pool()
@@ -314,6 +346,96 @@ async def list_open_tickets(user_id: int, limit: int = 50) -> list[Ticket]:
             LIMIT $2
             """,
             user_id, limit,
+        )
+        if not rows:
+            return []
+        ticket_ids = [r["id"] for r in rows]
+        materials = await _fetch_materials(conn, ticket_ids)
+        photos = await _fetch_photos(conn, ticket_ids)
+    return [
+        _row_to_ticket(r, materials.get(r["id"], []), photos.get(r["id"], []))
+        for r in rows
+    ]
+
+
+# --- Пользователи: списки и нагрузка ---------------------------------------
+
+async def list_users_except(exclude_ids: set[int]) -> list[dict]:
+    """
+    Все зарегистрированные пользователи, кроме переданных id.
+    Используется КРОСС для выбора монтёра.
+    """
+    pool = _get_pool()
+    if exclude_ids:
+        rows = await pool.fetch(
+            """
+            SELECT id, username, full_name FROM users
+            WHERE id <> ALL($1::bigint[])
+            ORDER BY full_name NULLS LAST, id
+            """,
+            list(exclude_ids),
+        )
+    else:
+        rows = await pool.fetch(
+            """
+            SELECT id, username, full_name FROM users
+            ORDER BY full_name NULLS LAST, id
+            """,
+        )
+    return [
+        {
+            "id": int(r["id"]),
+            "username": r["username"],
+            "full_name": r["full_name"] or f"id{r['id']}",
+        }
+        for r in rows
+    ]
+
+
+async def get_user(user_id: int) -> Optional[dict]:
+    """Полная инфа о пользователе по id."""
+    pool = _get_pool()
+    row = await pool.fetchrow(
+        "SELECT id, username, full_name FROM users WHERE id = $1",
+        user_id,
+    )
+    if not row:
+        return None
+    return {
+        "id": int(row["id"]),
+        "username": row["username"],
+        "full_name": row["full_name"] or f"id{row['id']}",
+    }
+
+
+async def count_open_tickets_for(user_id: int) -> int:
+    """Сколько у монтёра открытых (не закрытых) заявок."""
+    pool = _get_pool()
+    val = await pool.fetchval(
+        """
+        SELECT COUNT(*) FROM tickets
+        WHERE user_id = $1
+          AND (work_done IS NULL OR work_done = '')
+        """,
+        user_id,
+    )
+    return int(val or 0)
+
+
+async def list_dispatcher_inbox(
+    dispatcher_id: int, limit: int = 30,
+) -> list[Ticket]:
+    """Заявки, созданные данным КРОСС-ом (любому монтёру)."""
+    pool = _get_pool()
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            """
+            SELECT * FROM tickets
+            WHERE created_by_id = $1
+            ORDER BY created_at DESC
+            LIMIT $2
+            """,
+            dispatcher_id, limit,
         )
         if not rows:
             return []
@@ -701,6 +823,7 @@ def _row_to_ticket(
         customer_phone=row["customer_phone"],
         crm_ticket_number=row["crm_ticket_number"],
         license_account=row["license_account"],
+        created_by_id=row["created_by_id"],
         created_at=row["created_at"],
         updated_at=row["updated_at"],
         materials=materials,

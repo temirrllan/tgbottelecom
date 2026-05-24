@@ -13,7 +13,7 @@ from aiogram.enums import ParseMode
 from aiogram.fsm.storage.memory import MemoryStorage
 from dotenv import load_dotenv
 
-from bot.handlers import chat, commands, confirm, photo, route, stats, voice
+from bot.handlers import chat, commands, confirm, dispatcher, photo, route, stats, voice
 from bot.handlers.stats import build_stats_text
 from bot.services import db
 from bot.services.tz import LOCAL_TZ, local_now
@@ -130,6 +130,7 @@ async def main() -> None:
     #   6) голосовые сообщения,
     #   7) свободный чат с ИИ.
     dp.include_router(commands.router)
+    dp.include_router(dispatcher.router)
     dp.include_router(stats.router)
     dp.include_router(route.router)
     dp.include_router(confirm.router)

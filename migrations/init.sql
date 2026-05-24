@@ -35,6 +35,11 @@ ALTER TABLE tickets ADD COLUMN IF NOT EXISTS crm_ticket_number TEXT;
 ALTER TABLE tickets ADD COLUMN IF NOT EXISTS license_account TEXT;
 CREATE INDEX IF NOT EXISTS idx_tickets_crm_number ON tickets(crm_ticket_number);
 
+-- Кто создал заявку (если NULL — монтёр сам себе создал).
+-- Если задан — это КРОСС, который её назначил.
+ALTER TABLE tickets ADD COLUMN IF NOT EXISTS created_by_id BIGINT REFERENCES users(id);
+CREATE INDEX IF NOT EXISTS idx_tickets_created_by ON tickets(created_by_id);
+
 -- Материалы по заявке
 CREATE TABLE IF NOT EXISTS materials (
     id BIGSERIAL PRIMARY KEY,
