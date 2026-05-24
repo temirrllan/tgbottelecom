@@ -1,4 +1,4 @@
-"""Логика работы с Claude API для понимания сообщений монтёров."""
+"""Логика работы с Google Gemini API для понимания сообщений монтёров."""
 from __future__ import annotations
 
 import json
@@ -8,24 +8,25 @@ import re
 from datetime import datetime
 from typing import Optional
 
-from anthropic import AsyncAnthropic
+from google import genai
+from google.genai import types
 
 from bot.models.schemas import AIResponse
 
 logger = logging.getLogger(__name__)
 
-# Модель Claude
-MODEL = "claude-sonnet-4-20250514"
+# Модель Gemini — быстрая и с щедрым бесплатным тарифом
+MODEL = "gemini-2.5-flash"
 MAX_TOKENS = 1500
 
-_client: Optional[AsyncAnthropic] = None
+_client: Optional[genai.Client] = None
 
 
-def get_client() -> AsyncAnthropic:
-    """Ленивая инициализация клиента Anthropic."""
+def get_client() -> genai.Client:
+    """Ленивая инициализация клиента Gemini."""
     global _client
     if _client is None:
-        _client = AsyncAnthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
+        _client = genai.Client(api_key=os.environ["GEMINI_API_KEY"])
     return _client
 
 
@@ -78,8 +79,7 @@ SYSTEM_PROMPT = """Ты — ИИ-ассистент монтёра АО «Каз
 - Для EDIT_TICKET — подтверждение изменения.
 - Для CHAT — собственно ответ.
 
-ВАЖНО: верни СТРОГО валидный JSON без markdown-обёртки, без комментариев, без текста до или после.
-Формат:
+ВАЖНО: возвращай СТРОГО валидный JSON со схемой:
 {
   "action": "SAVE_TICKET" | "QUERY" | "EDIT_TICKET" | "CHAT",
   "data": { ... },
@@ -94,50 +94,63 @@ async def analyze_message(
     now: Optional[datetime] = None,
 ) -> AIResponse:
     """
-    Отправляет сообщение в Claude и возвращает структурированный ответ.
+    Отправляет сообщение в Gemini и возвращает структурированный ответ.
     history — последние сообщения формата [{"role": "user"|"assistant", "content": ...}].
     """
     if now is None:
         now = datetime.now().astimezone()
-
-    # Добавим временной контекст в системный промпт
     system = (
         f"{SYSTEM_PROMPT}\n\n"
         f"Текущие дата и время: {now.strftime('%Y-%m-%d %H:%M')} "
         f"({_weekday_ru(now)})."
     )
 
-    # Anthropic ожидает чередование user/assistant с непустым контентом.
-    messages = _sanitize_history(history) + [{"role": "user", "content": user_text}]
+    # Gemini использует роли user/model, контент в виде Content/Part.
+    cleaned = _sanitize_history(history)
+    contents: list[dict] = []
+    for msg in cleaned:
+        role = "model" if msg["role"] == "assistant" else "user"
+        contents.append({"role": role, "parts": [{"text": msg["content"]}]})
+    contents.append({"role": "user", "parts": [{"text": user_text}]})
 
     client = get_client()
     try:
-        response = await client.messages.create(
+        response = await client.aio.models.generate_content(
             model=MODEL,
-            max_tokens=MAX_TOKENS,
-            system=system,
-            messages=messages,
+            contents=contents,
+            config=types.GenerateContentConfig(
+                system_instruction=system,
+                response_mime_type="application/json",
+                max_output_tokens=MAX_TOKENS,
+                temperature=0.3,
+            ),
         )
     except Exception:
-        logger.exception("Ошибка обращения к Claude API")
+        logger.exception("Ошибка обращения к Gemini API")
         return AIResponse(
             action="CHAT",
             data={},
             reply="Извини, у меня сейчас проблемы со связью. Попробуй ещё раз через минуту.",
         )
 
-    raw = "".join(
-        block.text for block in response.content if getattr(block, "type", None) == "text"
-    ).strip()
+    raw = (response.text or "").strip()
+    if not raw:
+        # Сработал safety-фильтр Gemini или пустой ответ
+        logger.warning("Gemini вернул пустой ответ")
+        return AIResponse(
+            action="CHAT",
+            data={},
+            reply="Не понял запрос, можешь переформулировать?",
+        )
 
     return _parse_response(raw)
 
 
 def _parse_response(raw: str) -> AIResponse:
-    """Парсит JSON-ответ Claude, мягко обрабатывая обёртки."""
+    """Парсит JSON-ответ Gemini, мягко обрабатывая возможные обёртки."""
     text = raw.strip()
 
-    # Срезаем возможную markdown-обёртку ```json ... ```
+    # На случай, если модель всё же обернёт в ```json ... ```
     fence = re.match(r"^```(?:json)?\s*(.*?)\s*```$", text, re.DOTALL)
     if fence:
         text = fence.group(1).strip()
@@ -146,8 +159,7 @@ def _parse_response(raw: str) -> AIResponse:
         data = json.loads(text)
         return AIResponse.model_validate(data)
     except (json.JSONDecodeError, ValueError):
-        logger.warning("Не удалось распарсить JSON от Claude: %s", raw[:500])
-        # Фоллбэк — отдаём сырой текст как чат
+        logger.warning("Не удалось распарсить JSON от Gemini: %s", raw[:500])
         return AIResponse(
             action="CHAT",
             data={},
@@ -166,7 +178,7 @@ def _weekday_ru(dt: datetime) -> str:
 
 def _sanitize_history(history: list[dict]) -> list[dict]:
     """
-    Готовит историю для Anthropic API:
+    Готовит историю для Gemini:
     - выкидывает пустые сообщения,
     - схлопывает подряд идущие одинаковые роли,
     - гарантирует, что первая роль — 'user'.
@@ -178,12 +190,10 @@ def _sanitize_history(history: list[dict]) -> list[dict]:
         if not content or role not in ("user", "assistant"):
             continue
         if cleaned and cleaned[-1]["role"] == role:
-            # Объединяем соседние сообщения одной роли
             cleaned[-1]["content"] += "\n" + content
             continue
         cleaned.append({"role": role, "content": content})
 
-    # Anthropic требует, чтобы первое сообщение было от user
     while cleaned and cleaned[0]["role"] != "user":
         cleaned.pop(0)
     return cleaned

@@ -6,7 +6,7 @@
 
 ## Стек
 - Python 3.11+, aiogram 3.x
-- Claude API (`claude-sonnet-4-20250514`)
+- Google Gemini API (`gemini-2.5-flash`) — есть бесплатный тариф
 - PostgreSQL + asyncpg
 - Railway (Dockerfile + railway.toml)
 
@@ -14,7 +14,7 @@
 
 ```bash
 cp .env.example .env
-# заполнить BOT_TOKEN, ANTHROPIC_API_KEY, DATABASE_URL
+# заполнить BOT_TOKEN, GEMINI_API_KEY, DATABASE_URL
 
 pip install -r requirements.txt
 python -m bot.main
@@ -26,7 +26,7 @@ python -m bot.main
 
 1. Создать проект на Railway, подключить репозиторий.
 2. Добавить плагин PostgreSQL — `DATABASE_URL` подтянется автоматически.
-3. В переменные окружения добавить `BOT_TOKEN` и `ANTHROPIC_API_KEY`.
+3. В переменные окружения добавить `BOT_TOKEN` и `GEMINI_API_KEY`.
 4. (Опционально) `REMINDER_HOUR_START`, `REMINDER_HOUR_END`.
 
 Railway увидит `Dockerfile` и `railway.toml` и сам соберёт сервис.
@@ -50,14 +50,15 @@ migrations/init.sql        # схема БД
 
 ## Возможности ИИ
 
-Claude различает 4 типа сообщений и возвращает строгий JSON:
+Gemini различает 4 типа сообщений и возвращает строгий JSON
+(используется `response_mime_type="application/json"`):
 
 - **SAVE_TICKET** — сохранить заявку (адрес, проблема, что сделано, материалы, акт).
 - **QUERY** — поиск/отчёты («что я делал сегодня», «сколько кабеля за месяц»).
 - **EDIT_TICKET** — редактирование заявки, созданной сегодня.
 - **CHAT** — обычный разговор.
 
-История последних 10 сообщений передаётся в Claude для контекста.
+История последних 10 сообщений передаётся в Gemini для контекста.
 
 ## Напоминания
 
