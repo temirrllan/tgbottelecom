@@ -41,7 +41,7 @@ async def process_user_text(
     await db.upsert_user(user.id, user.username, user.full_name)
     await db.touch_user(user.id)
 
-    history = await db.get_recent_history(user.id, limit=10)
+    history = await db.get_recent_history(user.id, limit=5)
 
     try:
         ai_response = await ai.analyze_message(

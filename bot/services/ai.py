@@ -9,17 +9,26 @@ from datetime import datetime
 from typing import Optional
 
 from google import genai
+from google.genai import errors as genai_errors
 from google.genai import types
 
 from bot.models.schemas import AIResponse
 
 logger = logging.getLogger(__name__)
 
-# Модель Gemini — быстрая и с щедрым бесплатным тарифом
-MODEL = "gemini-2.5-flash"
-MAX_TOKENS = 1500
+# Модель Gemini, настраивается переменной окружения GEMINI_MODEL.
+# Варианты: gemini-2.5-flash (умнее), gemini-2.5-flash-lite (выше free tier).
+MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
+MAX_TOKENS = int(os.getenv("GEMINI_MAX_TOKENS", "3000"))
 
 _client: Optional[genai.Client] = None
+
+
+def _is_rate_limit_error(err: Exception) -> bool:
+    """Определяет, что упёрлись в дневной лимит API."""
+    if isinstance(err, genai_errors.ClientError):
+        return getattr(err, "code", None) == 429
+    return False
 
 
 def get_client() -> genai.Client:
@@ -129,7 +138,18 @@ async def analyze_message(
                 temperature=0.3,
             ),
         )
-    except Exception:
+    except Exception as err:
+        if _is_rate_limit_error(err):
+            logger.warning("Gemini API rate limit достигнут")
+            return AIResponse(
+                action="CHAT",
+                data={},
+                reply=(
+                    "🚦 Дневной лимит ИИ исчерпан. "
+                    "Завтра обнулится. Если срочно — обратись к админу, "
+                    "пусть поднимет квоту."
+                ),
+            )
         logger.exception("Ошибка обращения к Gemini API")
         return AIResponse(
             action="CHAT",
@@ -181,8 +201,11 @@ async def transcribe_voice(
                 temperature=0.1,
             ),
         )
-    except Exception:
-        logger.exception("Ошибка транскрипции голосового")
+    except Exception as err:
+        if _is_rate_limit_error(err):
+            logger.warning("Gemini API rate limit при транскрипции голосового")
+        else:
+            logger.exception("Ошибка транскрипции голосового")
         return None
 
     text = (response.text or "").strip()
@@ -322,8 +345,11 @@ async def merge_ticket(user_text: str, pending: dict) -> dict:
                 temperature=0.2,
             ),
         )
-    except Exception:
-        logger.exception("Ошибка merge_ticket")
+    except Exception as err:
+        if _is_rate_limit_error(err):
+            logger.warning("Gemini API rate limit при merge_ticket")
+        else:
+            logger.exception("Ошибка merge_ticket")
         return pending
 
     raw = (response.text or "").strip()

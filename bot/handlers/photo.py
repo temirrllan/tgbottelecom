@@ -99,7 +99,7 @@ async def _new_ticket_from_caption(
     if user is None:
         return
 
-    history = await db.get_recent_history(user.id, limit=10)
+    history = await db.get_recent_history(user.id, limit=5)
     try:
         ai_response = await ai.analyze_message(
             user_text=caption,
