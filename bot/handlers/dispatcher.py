@@ -79,8 +79,9 @@ async def cmd_inbox(message: Message) -> None:
             escape(executor["full_name"], quote=False) if executor else f"id{t.user_id}"
         )
         status_icon = "✅" if t.work_done else "⏳"
+        number = t.user_ticket_number or t.id
         lines.append(
-            f"{status_icon} #{t.id} • {executor_name} • "
+            f"{status_icon} <b>{executor_name}</b> #{number} • "
             f"{escape(t.address[:60], quote=False)}"
         )
     await message.answer("\n".join(lines))

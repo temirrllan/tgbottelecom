@@ -126,25 +126,41 @@ async def create_ticket(
     created_by_id: Optional[int] = None,
 ) -> int:
     """
-    Создаёт заявку с материалами и фото в одной транзакции, возвращает id.
+    Создаёт заявку с материалами и фото в одной транзакции, возвращает внутренний id.
     user_id — исполнитель (монтёр), created_by_id — кто создал (КРОСС или None).
+    Личный номер заявки (user_ticket_number) берётся из счётчика монтёра.
     """
     pool = _get_pool()
     async with pool.acquire() as conn:
         async with conn.transaction():
             visit = normalize_for_db(data.visit_date) or local_now()
+
+            # Атомарно инкрементим счётчик исполнителя
+            user_number = await conn.fetchval(
+                """
+                INSERT INTO user_ticket_counters (user_id, last_number)
+                VALUES ($1, 1)
+                ON CONFLICT (user_id) DO UPDATE
+                    SET last_number = user_ticket_counters.last_number + 1
+                RETURNING last_number
+                """,
+                user_id,
+            )
+
             ticket_id = await conn.fetchval(
                 """
                 INSERT INTO tickets (
-                    user_id, created_by_id, address, problem_description, work_done,
+                    user_id, created_by_id, user_ticket_number,
+                    address, problem_description, work_done,
                     visit_date, is_repeat_visit, act_number,
                     customer_name, customer_phone, crm_ticket_number, license_account
                 )
-                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
                 RETURNING id
                 """,
                 user_id,
                 created_by_id,
+                int(user_number),
                 data.address,
                 data.problem_description,
                 data.work_done,
@@ -261,8 +277,32 @@ async def update_ticket(
     return True
 
 
+async def get_ticket_by_number(
+    user_id: int, user_ticket_number: int,
+) -> Optional[Ticket]:
+    """Получает заявку по личному номеру монтёра (#1, #2, …)."""
+    pool = _get_pool()
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            """
+            SELECT * FROM tickets
+            WHERE user_id = $1 AND user_ticket_number = $2
+            """,
+            user_id, user_ticket_number,
+        )
+        if not row:
+            return None
+        materials = await _fetch_materials(conn, [row["id"]])
+        photos = await _fetch_photos(conn, [row["id"]])
+    return _row_to_ticket(
+        row,
+        materials.get(row["id"], []),
+        photos.get(row["id"], []),
+    )
+
+
 async def get_ticket(user_id: int, ticket_id: int) -> Optional[Ticket]:
-    """Получает одну заявку с материалами и фото (только если принадлежит юзеру)."""
+    """Получает одну заявку по внутреннему id с материалами и фото."""
     pool = _get_pool()
     async with pool.acquire() as conn:
         row = await conn.fetchrow(
@@ -812,6 +852,7 @@ def _row_to_ticket(
 ) -> Ticket:
     return Ticket(
         id=row["id"],
+        user_ticket_number=row["user_ticket_number"],
         user_id=row["user_id"],
         address=row["address"],
         problem_description=row["problem_description"],

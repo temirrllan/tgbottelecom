@@ -345,10 +345,11 @@ async def on_assign(
     except TelegramBadRequest:
         pass
 
-    # Подтверждение КРОСС-у
+    # Подтверждение КРОСС-у — показываем личный номер монтёра
+    display_num = (saved.user_ticket_number if saved else None) or ticket_id
     await cb.message.answer(
-        f"✅ Заявка #{ticket_id} назначена монтёру "
-        f"<b>{_e(monteur['full_name'])}</b>."
+        f"✅ Заявка <b>{_e(monteur['full_name'])} #{display_num}</b> "
+        f"назначена."
     )
     await cb.answer("Отправил монтёру")
 

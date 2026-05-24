@@ -40,6 +40,39 @@ CREATE INDEX IF NOT EXISTS idx_tickets_crm_number ON tickets(crm_ticket_number);
 ALTER TABLE tickets ADD COLUMN IF NOT EXISTS created_by_id BIGINT REFERENCES users(id);
 CREATE INDEX IF NOT EXISTS idx_tickets_created_by ON tickets(created_by_id);
 
+-- Личный номер заявки у каждого пользователя (1, 2, 3...).
+-- Внутренний id остаётся для FK, наружу показывается user_ticket_number.
+ALTER TABLE tickets ADD COLUMN IF NOT EXISTS user_ticket_number INTEGER;
+CREATE UNIQUE INDEX IF NOT EXISTS uniq_tickets_user_number
+    ON tickets(user_id, user_ticket_number)
+    WHERE user_ticket_number IS NOT NULL;
+
+-- Счётчик последнего номера на каждого пользователя
+CREATE TABLE IF NOT EXISTS user_ticket_counters (
+    user_id BIGINT PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+    last_number INTEGER NOT NULL DEFAULT 0
+);
+
+-- Бэкфилл: для старых заявок без личного номера присваиваем по порядку
+WITH numbered AS (
+    SELECT id, user_id,
+           ROW_NUMBER() OVER (PARTITION BY user_id ORDER BY id) AS rn
+    FROM tickets
+    WHERE user_ticket_number IS NULL
+)
+UPDATE tickets t
+SET user_ticket_number = n.rn
+FROM numbered n
+WHERE t.id = n.id;
+
+-- Синхронизация счётчиков с реальностью (берём максимум)
+INSERT INTO user_ticket_counters (user_id, last_number)
+SELECT user_id, COALESCE(MAX(user_ticket_number), 0) FROM tickets
+WHERE user_ticket_number IS NOT NULL
+GROUP BY user_id
+ON CONFLICT (user_id) DO UPDATE
+    SET last_number = GREATEST(EXCLUDED.last_number, user_ticket_counters.last_number);
+
 -- Материалы по заявке
 CREATE TABLE IF NOT EXISTS materials (
     id BIGSERIAL PRIMARY KEY,

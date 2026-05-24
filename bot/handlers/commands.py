@@ -203,17 +203,18 @@ async def cmd_photos(message: Message, command: CommandObject) -> None:
     arg = (command.args or "").strip()
     if not arg or not arg.isdigit():
         await message.answer(
-            "Укажи номер заявки: <code>/photos 123</code>"
+            "Укажи номер заявки: <code>/photos 5</code>"
         )
         return
-    ticket = await db.get_ticket(message.from_user.id, int(arg))
+    ticket = await db.get_ticket_by_number(message.from_user.id, int(arg))
     if ticket is None:
         await message.answer("Не нашёл такой заявки.")
         return
+    number = ticket.user_ticket_number or ticket.id
     if not ticket.photos:
-        await message.answer(f"К заявке #{ticket.id} фото не прикреплено.")
+        await message.answer(f"К заявке #{number} фото не прикреплено.")
         return
 
     from bot.handlers.confirm import send_photos
-    await message.answer(f"📷 Фото заявки #{ticket.id} ({len(ticket.photos)} шт):")
+    await message.answer(f"📷 Фото заявки #{number} ({len(ticket.photos)} шт):")
     await send_photos(message, ticket.photos)

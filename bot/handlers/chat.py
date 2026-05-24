@@ -151,25 +151,27 @@ async def _handle_edit(message: Message, ai_response: AIResponse) -> None:
     ticket_id: Optional[int] = data.get("ticket_id")
     changes = data.get("changes") or {}
 
+    existing = None
     if not ticket_id:
-        last = await db.get_last_ticket_today(user_id)
-        if last is None:
+        # Без номера — берём последнюю заявку текущего дня
+        existing = await db.get_last_ticket_today(user_id)
+        if existing is None:
             await message.answer(
                 "Не нашёл сегодняшней заявки для редактирования. "
-                "Укажи номер: «по 123 ...»"
+                "Укажи номер: «по 5 ...»"
             )
             return
-        ticket_id = last.id
+    else:
+        # Пользователь дал номер — пробуем личный номер монтёра
+        existing = await db.get_ticket_by_number(user_id, int(ticket_id))
+        # Если не нашли — может это длинный номер из CRM
+        if existing is None:
+            existing = await db.find_ticket_by_crm(user_id, str(ticket_id))
 
-    existing = await db.get_ticket(user_id, ticket_id)
-    # Если по id бота не нашли — может, это длинный номер CRM
-    if existing is None:
-        existing = await db.find_ticket_by_crm(user_id, str(ticket_id))
-        if existing is not None:
-            ticket_id = existing.id
     if existing is None:
         await message.answer("Не нашёл такой заявки.")
         return
+    ticket_id = existing.id  # дальше работаем по внутреннему id
     # Правило: редактировать можно либо сегодняшние, либо ещё «открытые»
     # (без work_done). Это позволяет закрывать назначенные КРОСС-ом заявки
     # на следующий день.
@@ -210,10 +212,11 @@ async def _handle_edit(message: Message, ai_response: AIResponse) -> None:
     ):
         monteur = await db.get_user(user_id)
         monteur_name = (monteur or {}).get("full_name", f"монтёр {user_id}")
+        display_num = updated.user_ticket_number or updated.id
         try:
             await message.bot.send_message(
                 updated.created_by_id,
-                f"✅ <b>{monteur_name}</b> закрыл заявку #{updated.id}\n\n"
+                f"✅ <b>{monteur_name}</b> закрыл заявку #{display_num}\n\n"
                 + format_ticket(updated),
             )
         except Exception as e:

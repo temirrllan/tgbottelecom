@@ -24,6 +24,10 @@ from bot.services import db
 from bot.services.geocode import Coords, geocode
 from bot.services.routing import RoutePoint, plan_route, total_distance_km
 
+# Личный номер монтёра для отображения вместо внутреннего id
+def _ticket_number(t) -> int:
+    return getattr(t, "user_ticket_number", None) or t.id
+
 logger = logging.getLogger(__name__)
 router = Router(name="route")
 
@@ -83,7 +87,7 @@ async def _send_route(message: Message, start: Coords | None) -> None:
             failed.append(t.address)
             continue
         points.append(RoutePoint(
-            ticket_id=t.id,
+            ticket_id=_ticket_number(t),  # личный номер для отображения
             address=t.address,
             coords=coords,
         ))

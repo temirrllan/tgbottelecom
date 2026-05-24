@@ -61,8 +61,9 @@ class TicketUpdate(BaseModel):
 
 class Ticket(BaseModel):
     """Заявка из БД."""
-    id: int
-    user_id: int                       # исполнитель (монтёр)
+    id: int                              # внутренний PK, для FK и связок
+    user_ticket_number: Optional[int] = None  # личный номер у этого монтёра (#1, #2, …)
+    user_id: int                         # исполнитель (монтёр)
     created_by_id: Optional[int] = None  # кто создал (если null — монтёр сам)
     address: str
     problem_description: Optional[str] = None
