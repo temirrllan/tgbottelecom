@@ -146,6 +146,47 @@ async def analyze_message(
     return _parse_response(raw)
 
 
+async def transcribe_voice(
+    audio_bytes: bytes,
+    mime_type: str = "audio/ogg",
+) -> Optional[str]:
+    """
+    Транскрибирует голосовое сообщение через Gemini.
+    Telegram отдаёт voice в OGG/Opus, Gemini это поддерживает напрямую.
+    Возвращает распознанный текст или None при ошибке.
+    """
+    client = get_client()
+    prompt = (
+        "Это голосовое сообщение монтёра Казактелекома на русском языке. "
+        "Транскрибируй его точно, без комментариев и без перефразирования. "
+        "Сохраняй термины (кабель, патчкорд, акт, ОНТ, оптика и т. д.). "
+        "Верни ТОЛЬКО распознанный текст, ничего больше."
+    )
+    try:
+        response = await client.aio.models.generate_content(
+            model=MODEL,
+            contents=[{
+                "role": "user",
+                "parts": [
+                    {"inline_data": {"mime_type": mime_type, "data": audio_bytes}},
+                    {"text": prompt},
+                ],
+            }],
+            config=types.GenerateContentConfig(
+                max_output_tokens=1000,
+                temperature=0.1,
+            ),
+        )
+    except Exception:
+        logger.exception("Ошибка транскрипции голосового")
+        return None
+
+    text = (response.text or "").strip()
+    # Иногда модель оборачивает в кавычки — снимаем
+    text = text.strip('"').strip("«»").strip()
+    return text or None
+
+
 VISION_PROMPT = """На вход дано изображение. Скорее всего это скриншот заявки из CRM-системы Казактелекома («Единичное повреждение», «WFM», окно заявки и т. п.).
 
 Если это действительно скриншот CRM-заявки — извлеки данные и верни JSON:

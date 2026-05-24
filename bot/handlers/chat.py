@@ -23,11 +23,17 @@ logger = logging.getLogger(__name__)
 router = Router(name="chat")
 
 
-@router.message(F.text & ~F.text.startswith("/"))
-async def handle_text(message: Message, state: FSMContext) -> None:
-    """Любое текстовое сообщение, кроме команд, идёт через ИИ."""
+async def process_user_text(
+    message: Message,
+    state: FSMContext,
+    text: str,
+) -> None:
+    """
+    Универсальная обработка пользовательского текста через ИИ.
+    Используется и для обычных сообщений, и для транскрипций голосовых.
+    """
     user = message.from_user
-    if user is None or not message.text:
+    if user is None or not text:
         return
 
     # Регистрируем пользователя на лету, если он ещё не сделал /start
@@ -38,7 +44,7 @@ async def handle_text(message: Message, state: FSMContext) -> None:
 
     try:
         ai_response = await ai.analyze_message(
-            user_text=message.text,
+            user_text=text,
             history=history,
             now=datetime.now().astimezone(),
         )
@@ -48,7 +54,7 @@ async def handle_text(message: Message, state: FSMContext) -> None:
         return
 
     # Сохраняем оба сообщения в историю
-    await db.add_history(user.id, "user", message.text)
+    await db.add_history(user.id, "user", text)
     if ai_response.reply:
         await db.add_history(user.id, "assistant", ai_response.reply)
     await db.trim_history(user.id, keep=20)
@@ -62,6 +68,13 @@ async def handle_text(message: Message, state: FSMContext) -> None:
         await _handle_edit(message, ai_response)
     else:
         await message.answer(ai_response.reply or "Понял.")
+
+
+@router.message(F.text & ~F.text.startswith("/"))
+async def handle_text(message: Message, state: FSMContext) -> None:
+    """Любое текстовое сообщение, кроме команд, идёт через ИИ."""
+    if message.text:
+        await process_user_text(message, state, message.text)
 
 
 # --- SAVE_TICKET ------------------------------------------------------------

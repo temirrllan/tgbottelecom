@@ -242,15 +242,14 @@ async def on_edit(cb: CallbackQuery, state: FSMContext) -> None:
     await cb.answer()
 
 
-# --- Текст в режиме подтверждения/правки → мерж -----------------------------
+# --- Применение текстовой правки к черновику --------------------------------
 
-@router.message(
-    StateFilter(TicketConfirm.waiting, TicketConfirm.editing),
-    F.text & ~F.text.startswith("/"),
-)
-async def handle_edit_text(message: Message, state: FSMContext) -> None:
-    """Слияние правки от пользователя с черновиком в FSM."""
-    if message.from_user is None or not message.text:
+async def apply_text_edit(message: Message, state: FSMContext, text: str) -> None:
+    """
+    Сливает текстовую правку с черновиком и показывает обновлённое превью.
+    Используется и из текстового хендлера, и из голосового.
+    """
+    if message.from_user is None or not text:
         return
 
     data = await state.get_data()
@@ -260,7 +259,7 @@ async def handle_edit_text(message: Message, state: FSMContext) -> None:
         await message.answer("Черновик потерян. Опиши заявку заново.")
         return
 
-    merged_dict = await ai.merge_ticket(message.text, pending)
+    merged_dict = await ai.merge_ticket(text, pending)
     try:
         merged_ticket = TicketIn.model_validate(merged_dict)
     except ValidationError:
@@ -271,9 +270,18 @@ async def handle_edit_text(message: Message, state: FSMContext) -> None:
         )
         return
 
-    # Снимаем кнопки со старого превью и показываем новое
     await _disable_old_preview(message, state)
     await show_preview(
         message, state, merged_ticket,
         intro="✏️ Обновил черновик:",
     )
+
+
+@router.message(
+    StateFilter(TicketConfirm.waiting, TicketConfirm.editing),
+    F.text & ~F.text.startswith("/"),
+)
+async def handle_edit_text(message: Message, state: FSMContext) -> None:
+    """Текст в состоянии подтверждения → применяем как правку."""
+    if message.text:
+        await apply_text_edit(message, state, message.text)
