@@ -18,6 +18,7 @@ from bot.services.formatting import (
     format_ticket,
     format_tickets_list,
 )
+from bot.services.tz import local_now
 
 logger = logging.getLogger(__name__)
 router = Router(name="chat")
@@ -46,7 +47,7 @@ async def process_user_text(
         ai_response = await ai.analyze_message(
             user_text=text,
             history=history,
-            now=datetime.now().astimezone(),
+            now=local_now(),
         )
     except Exception:
         logger.exception("Ошибка при вызове ИИ")
@@ -165,7 +166,8 @@ async def _handle_edit(message: Message, ai_response: AIResponse) -> None:
     if existing is None:
         await message.answer("Не нашёл такой заявки.")
         return
-    if existing.created_at.date() != datetime.now().astimezone().date():
+    from bot.services.tz import to_local
+    if to_local(existing.created_at).date() != local_now().date():
         await message.answer(
             "Редактировать можно только заявки, созданные сегодня."
         )

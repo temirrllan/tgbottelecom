@@ -12,6 +12,7 @@ from aiogram.filters import Command, CommandObject
 from aiogram.types import Message
 
 from bot.services import db
+from bot.services.tz import local_now
 
 logger = logging.getLogger(__name__)
 router = Router(name="stats")
@@ -24,9 +25,10 @@ def _period_bounds(period: str) -> tuple[datetime, datetime, datetime, str]:
     Возвращает (since, prev_since, prev_until, label) для периода.
     prev_* — предыдущий такой же отрезок для сравнения.
     """
-    now = datetime.now().astimezone()
+    now = local_now()
     if period == "today":
-        since = datetime.combine(now.date(), datetime.min.time()).astimezone()
+        # Полночь по локальной TZ
+        since = now.replace(hour=0, minute=0, second=0, microsecond=0)
         prev_until = since
         prev_since = since - timedelta(days=1)
         label = "сегодня"

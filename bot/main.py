@@ -16,6 +16,7 @@ from dotenv import load_dotenv
 from bot.handlers import chat, commands, confirm, photo, stats, voice
 from bot.handlers.stats import build_stats_text
 from bot.services import db
+from bot.services.tz import LOCAL_TZ, local_now
 
 logger = logging.getLogger(__name__)
 
@@ -36,7 +37,7 @@ async def evening_summary_loop(bot: Bot) -> None:
 
     while True:
         try:
-            now = datetime.now().astimezone()
+            now = local_now()
             today = now.date()
             # Чистим старые отметки, оставляем только сегодняшнюю
             fired_dates = {d for d in fired_dates if d == today}
@@ -59,11 +60,13 @@ async def evening_summary_loop(bot: Bot) -> None:
 async def _send_evening_summaries(bot: Bot) -> None:
     """Рассылает сводку всем монтёрам, у которых сегодня была активность."""
     pool = db._get_pool()
+    today = local_now().date()
     rows = await pool.fetch(
         """
         SELECT DISTINCT user_id FROM tickets
-        WHERE visit_date::date = CURRENT_DATE
-        """
+        WHERE (visit_date AT TIME ZONE $1)::date = $2
+        """,
+        str(LOCAL_TZ), today,
     )
     for row in rows:
         uid = int(row["user_id"])

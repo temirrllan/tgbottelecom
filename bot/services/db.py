@@ -17,6 +17,7 @@ from bot.models.schemas import (
     TicketIn,
     TicketUpdate,
 )
+from bot.services.tz import LOCAL_TZ, local_now, normalize_for_db
 
 logger = logging.getLogger(__name__)
 
@@ -97,7 +98,7 @@ async def get_idle_users(
     Только в рабочее время (08:00–18:00) и в рабочие дни (пн–сб).
     """
     pool = _get_pool()
-    now = datetime.now(timezone.utc).astimezone()
+    now = local_now()
     if now.weekday() == 6:  # воскресенье
         return []
     if not (work_hour_start <= now.hour < work_hour_end):
@@ -115,13 +116,8 @@ async def get_idle_users(
 
 # --- Заявки -----------------------------------------------------------------
 
-def _normalize_dt(dt: Optional[datetime]) -> Optional[datetime]:
-    """Привязывает наивный datetime к локальной таймзоне (для TIMESTAMPTZ)."""
-    if dt is None:
-        return None
-    if dt.tzinfo is None:
-        return dt.astimezone()
-    return dt
+# Алиас для обратной совместимости внутри модуля
+_normalize_dt = normalize_for_db
 
 
 async def create_ticket(user_id: int, data: TicketIn) -> int:
@@ -129,7 +125,7 @@ async def create_ticket(user_id: int, data: TicketIn) -> int:
     pool = _get_pool()
     async with pool.acquire() as conn:
         async with conn.transaction():
-            visit = _normalize_dt(data.visit_date) or datetime.now(timezone.utc)
+            visit = normalize_for_db(data.visit_date) or local_now()
             ticket_id = await conn.fetchval(
                 """
                 INSERT INTO tickets (
@@ -212,7 +208,7 @@ async def update_ticket(
         if field in ("materials", "photos"):
             continue
         if field == "visit_date":
-            value = _normalize_dt(value)
+            value = normalize_for_db(value)
         fields.append(f"{field} = ${idx}")
         values.append(value)
         idx += 1
@@ -277,18 +273,19 @@ async def get_ticket(user_id: int, ticket_id: int) -> Optional[Ticket]:
 
 
 async def get_last_ticket_today(user_id: int) -> Optional[Ticket]:
-    """Последняя заявка монтёра, созданная сегодня."""
+    """Последняя заявка монтёра, созданная сегодня (по локальной TZ)."""
     pool = _get_pool()
+    today = local_now().date()
     async with pool.acquire() as conn:
         row = await conn.fetchrow(
             """
             SELECT * FROM tickets
             WHERE user_id = $1
-              AND created_at::date = CURRENT_DATE
+              AND (created_at AT TIME ZONE $2)::date = $3
             ORDER BY created_at DESC
             LIMIT 1
             """,
-            user_id,
+            user_id, str(LOCAL_TZ), today,
         )
         if not row:
             return None
@@ -317,7 +314,10 @@ async def list_tickets(
     idx = 2
 
     if period == "today":
-        where.append("visit_date::date = CURRENT_DATE")
+        where.append(f"(visit_date AT TIME ZONE ${idx})::date = ${idx + 1}")
+        args.append(str(LOCAL_TZ))
+        args.append(local_now().date())
+        idx += 2
     elif period == "week":
         where.append("visit_date >= NOW() - INTERVAL '7 days'")
     elif period == "month":

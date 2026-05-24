@@ -6,6 +6,7 @@ from html import escape
 from typing import Iterable
 
 from bot.models.schemas import Ticket
+from bot.services.tz import to_local
 
 
 def _e(value) -> str:
@@ -19,7 +20,7 @@ def format_ticket(t: Ticket) -> str:
     if t.crm_ticket_number:
         lines.append(f"🆔 CRM: {_e(t.crm_ticket_number)}")
     lines.append(f"📍 Адрес: {_e(t.address)}")
-    lines.append(f"🕐 Время: {t.visit_date.strftime('%d.%m.%Y %H:%M')}")
+    lines.append(f"🕐 Время: {to_local(t.visit_date).strftime('%d.%m.%Y %H:%M')}")
     if t.customer_name:
         lines.append(f"👤 Абонент: {_e(t.customer_name)}")
     if t.customer_phone:

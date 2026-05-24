@@ -25,6 +25,7 @@ from pydantic import ValidationError
 from bot.handlers.confirm import TicketConfirm, show_preview
 from bot.models.schemas import TicketIn
 from bot.services import ai, db
+from bot.services.tz import local_now
 
 logger = logging.getLogger(__name__)
 router = Router(name="photo")
@@ -182,7 +183,7 @@ async def _new_ticket_from_caption(
         ai_response = await ai.analyze_message(
             user_text=caption,
             history=history,
-            now=datetime.now().astimezone(),
+            now=local_now(),
         )
     except Exception:
         logger.exception("Ошибка при разборе caption фото")

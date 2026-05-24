@@ -22,6 +22,7 @@ from pydantic import ValidationError
 from bot.models.schemas import TicketIn
 from bot.services import ai, db
 from bot.services.formatting import format_ticket
+from bot.services.tz import to_local
 
 logger = logging.getLogger(__name__)
 router = Router(name="confirm")
@@ -74,7 +75,7 @@ def _format_preview(t: TicketIn) -> str:
         lines.append(f"🆔 CRM: {_e(t.crm_ticket_number)}")
     lines.append(f"📍 Адрес: {_e(t.address)}")
     if t.visit_date:
-        lines.append(f"🕐 Время: {t.visit_date.strftime('%d.%m.%Y %H:%M')}")
+        lines.append(f"🕐 Время: {to_local(t.visit_date).strftime('%d.%m.%Y %H:%M')}")
     if t.customer_name:
         lines.append(f"👤 Абонент: {_e(t.customer_name)}")
     if t.customer_phone:
