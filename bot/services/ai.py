@@ -16,20 +16,26 @@ from bot.models.schemas import AIResponse
 
 logger = logging.getLogger(__name__)
 
-# Модели OpenAI настраиваются переменными окружения
+# Модели и эндпоинт настраиваются переменными окружения.
+# Можно использовать OpenAI напрямую или совместимые провайдеры
+# (OpenRouter, DeepSeek, vLLM-сервер и т.п.) через OPENAI_BASE_URL.
 CHAT_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
-VISION_MODEL = os.getenv("OPENAI_VISION_MODEL", "gpt-4o-mini")
+VISION_MODEL = os.getenv("OPENAI_VISION_MODEL", CHAT_MODEL)
 WHISPER_MODEL = os.getenv("OPENAI_WHISPER_MODEL", "whisper-1")
 MAX_TOKENS = int(os.getenv("OPENAI_MAX_TOKENS", "3000"))
+BASE_URL = os.getenv("OPENAI_BASE_URL")  # None → официальный OpenAI
 
 _client: Optional[AsyncOpenAI] = None
 
 
 def get_client() -> AsyncOpenAI:
-    """Ленивая инициализация клиента OpenAI."""
+    """Ленивая инициализация клиента OpenAI (или совместимого провайдера)."""
     global _client
     if _client is None:
-        _client = AsyncOpenAI(api_key=os.environ["OPENAI_API_KEY"])
+        kwargs: dict = {"api_key": os.environ["OPENAI_API_KEY"]}
+        if BASE_URL:
+            kwargs["base_url"] = BASE_URL
+        _client = AsyncOpenAI(**kwargs)
     return _client
 
 
@@ -255,7 +261,8 @@ async def transcribe_voice(
         if _is_rate_limit_error(err):
             logger.warning("OpenAI rate limit при транскрипции голосового")
         else:
-            logger.exception("Ошибка транскрипции голосового")
+            # OpenRouter и некоторые провайдеры не поддерживают audio API
+            logger.warning("Транскрипция недоступна (возможно, провайдер не поддерживает Whisper): %s", err)
         return None
 
     text = (response.text or "").strip()
