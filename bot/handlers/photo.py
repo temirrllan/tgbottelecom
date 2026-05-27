@@ -101,13 +101,17 @@ async def _new_ticket_from_caption(
 
     history = await db.get_recent_history(user.id, limit=5)
     from bot.handlers.chat import _build_open_tickets_context
-    open_context = await _build_open_tickets_context(user.id)
+    from bot.services.roles import is_dispatcher
+    is_kross = is_dispatcher(user.id)
+    open_context = [] if is_kross else await _build_open_tickets_context(user.id)
+    role_label = "КРОСС" if is_kross else "монтёр"
     try:
         ai_response = await ai.analyze_message(
             user_text=caption,
             history=history,
             now=local_now(),
             open_tickets=open_context,
+            user_role=role_label,
         )
     except Exception:
         logger.exception("Ошибка при разборе caption фото")

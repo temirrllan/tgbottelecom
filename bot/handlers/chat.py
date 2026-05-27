@@ -19,6 +19,7 @@ from bot.services.formatting import (
     format_tickets_by_day,
     format_tickets_list,
 )
+from bot.services.roles import is_dispatcher
 from bot.services.tz import local_now
 
 logger = logging.getLogger(__name__)
@@ -43,7 +44,10 @@ async def process_user_text(
     await db.touch_user(user.id)
 
     history = await db.get_recent_history(user.id, limit=5)
-    open_context = await _build_open_tickets_context(user.id)
+    # КРОСС не имеет «своих» открытых заявок в роли исполнителя — не передаём контекст
+    is_kross = is_dispatcher(user.id)
+    open_context = [] if is_kross else await _build_open_tickets_context(user.id)
+    role_label = "КРОСС" if is_kross else "монтёр"
 
     try:
         ai_response = await ai.analyze_message(
@@ -51,6 +55,7 @@ async def process_user_text(
             history=history,
             now=local_now(),
             open_tickets=open_context,
+            user_role=role_label,
         )
     except Exception:
         logger.exception("Ошибка при вызове ИИ")
