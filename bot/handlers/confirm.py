@@ -82,7 +82,12 @@ def _format_preview(t: TicketIn) -> str:
         lines.append(f"🆔 CRM: {_e(t.crm_ticket_number)}")
     lines.append(f"📍 Адрес: {_e(t.address)}")
     if t.visit_date:
-        lines.append(f"🕐 Время: {to_local(t.visit_date).strftime('%d.%m.%Y %H:%M')}")
+        visit_str = to_local(t.visit_date).strftime("%d.%m.%Y %H:%M")
+        # Для открытого черновика (нет work_done) — время «ждёт с» крупно
+        if not t.work_done:
+            lines.append(f"⏰ <b>Абонент ждёт: {visit_str}</b>")
+        else:
+            lines.append(f"🕐 Время визита: {visit_str}")
     if t.customer_name:
         lines.append(f"👤 Абонент: {_e(t.customer_name)}")
     if t.customer_phone:

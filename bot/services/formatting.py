@@ -22,7 +22,14 @@ def format_ticket(t: Ticket) -> str:
     if t.crm_ticket_number:
         lines.append(f"🆔 CRM: {_e(t.crm_ticket_number)}")
     lines.append(f"📍 Адрес: {_e(t.address)}")
-    lines.append(f"🕐 Время: {to_local(t.visit_date).strftime('%d.%m.%Y %H:%M')}")
+
+    # Время. Для открытой заявки — «Ждёт с» крупно (это критическая инфа).
+    visit_str = to_local(t.visit_date).strftime("%d.%m.%Y %H:%M")
+    if not t.work_done:
+        lines.append(f"⏰ <b>Абонент ждёт: {visit_str}</b>")
+    else:
+        lines.append(f"🕐 Время визита: {visit_str}")
+
     if t.customer_name:
         lines.append(f"👤 Абонент: {_e(t.customer_name)}")
     if t.customer_phone:
