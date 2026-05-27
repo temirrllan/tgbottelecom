@@ -462,6 +462,111 @@ async def count_open_tickets_for(user_id: int) -> int:
     return int(val or 0)
 
 
+async def get_ticket_for_dispatcher(
+    ticket_id: int, dispatcher_id: int,
+) -> Optional[Ticket]:
+    """
+    Получает заявку без проверки исполнителя, но проверяя,
+    что она создана этим КРОСС. Нужно для переназначения и удаления.
+    """
+    pool = _get_pool()
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            "SELECT * FROM tickets WHERE id = $1 AND created_by_id = $2",
+            ticket_id, dispatcher_id,
+        )
+        if not row:
+            return None
+        materials = await _fetch_materials(conn, [row["id"]])
+        photos = await _fetch_photos(conn, [row["id"]])
+    return _row_to_ticket(
+        row,
+        materials.get(row["id"], []),
+        photos.get(row["id"], []),
+    )
+
+
+async def reassign_ticket(
+    ticket_id: int,
+    new_user_id: int,
+    dispatcher_id: int,
+) -> tuple[bool, Optional[int], Optional[int]]:
+    """
+    Переназначает заявку другому монтёру.
+    Возвращает (success, old_user_id, new_user_ticket_number).
+    success=False если: заявка не существует / не принадлежит КРОСС /
+    закрыта / уже у этого же монтёра.
+    """
+    pool = _get_pool()
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            row = await conn.fetchrow(
+                """
+                SELECT id, user_id, work_done FROM tickets
+                WHERE id = $1 AND created_by_id = $2
+                FOR UPDATE
+                """,
+                ticket_id, dispatcher_id,
+            )
+            if not row:
+                return (False, None, None)
+            if row["work_done"]:
+                return (False, None, None)
+            old_user_id = int(row["user_id"])
+            if old_user_id == new_user_id:
+                return (False, old_user_id, None)
+
+            new_number = await conn.fetchval(
+                """
+                INSERT INTO user_ticket_counters (user_id, last_number)
+                VALUES ($1, 1)
+                ON CONFLICT (user_id) DO UPDATE
+                    SET last_number = user_ticket_counters.last_number + 1
+                RETURNING last_number
+                """,
+                new_user_id,
+            )
+
+            await conn.execute(
+                """
+                UPDATE tickets SET
+                    user_id = $1,
+                    user_ticket_number = $2,
+                    updated_at = NOW()
+                WHERE id = $3
+                """,
+                new_user_id, int(new_number), ticket_id,
+            )
+    return (True, old_user_id, int(new_number))
+
+
+async def delete_ticket(ticket_id: int, dispatcher_id: int) -> tuple[bool, Optional[int], Optional[int]]:
+    """
+    Удаляет заявку (с CASCADE для материалов и фото).
+    Возвращает (success, executor_user_id, user_ticket_number) для уведомления.
+    """
+    pool = _get_pool()
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            row = await conn.fetchrow(
+                """
+                SELECT user_id, user_ticket_number FROM tickets
+                WHERE id = $1 AND created_by_id = $2
+                """,
+                ticket_id, dispatcher_id,
+            )
+            if not row:
+                return (False, None, None)
+            executor_id = int(row["user_id"])
+            number = row["user_ticket_number"]
+
+            await conn.execute(
+                "DELETE FROM tickets WHERE id = $1 AND created_by_id = $2",
+                ticket_id, dispatcher_id,
+            )
+    return (True, executor_id, int(number) if number else None)
+
+
 async def list_dispatcher_inbox(
     dispatcher_id: int, limit: int = 30,
 ) -> list[Ticket]:
