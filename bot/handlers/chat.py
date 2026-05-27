@@ -76,7 +76,28 @@ async def process_user_text(
     elif ai_response.action == "EDIT_TICKET":
         await _handle_edit(message, ai_response)
     else:
-        await message.answer(ai_response.reply or "Понял.")
+        # Защита от галлюцинаций ИИ: если он в CHAT написал «заявка создана»
+        # — ничего на самом деле не сохранилось, не вводим пользователя в заблуждение.
+        reply_text = ai_response.reply or "Понял."
+        if _looks_like_fake_confirmation(reply_text):
+            reply_text = (
+                "Чтобы создать заявку, нужен адрес и описание проблемы в одном сообщении. "
+                "Например: <i>«ул. Беркимбаева 75, ТВ-каналы не показывают»</i>."
+            )
+        await message.answer(reply_text)
+
+
+def _looks_like_fake_confirmation(text: str) -> bool:
+    """Эвристика — детектит ложные «заявка сохранена» в CHAT-ответах."""
+    lowered = text.lower()
+    triggers = (
+        "заявка успешно",
+        "заявка сохранена",
+        "заявка создана",
+        "заявка зарегистрирована",
+        "принят" + "о в работу",
+    )
+    return any(t in lowered for t in triggers)
 
 
 @router.message(F.text & ~F.text.startswith("/"))
@@ -99,10 +120,14 @@ async def _handle_save(
     try:
         ticket_in = TicketIn.model_validate(ai_response.data)
     except ValidationError as e:
-        logger.warning("ИИ вернул некорректные данные заявки: %s", e)
+        logger.warning(
+            "ИИ вернул некорректные данные заявки: %s; data=%s",
+            e, ai_response.data,
+        )
         await message.answer(
-            ai_response.reply
-            or "Не хватает данных для заявки. Уточни, пожалуйста, адрес и что делал."
+            "⚠️ Не смог собрать заявку — не хватает данных. "
+            "Уточни адрес и опиши проблему одним сообщением, например:\n"
+            "<i>«ул. Беркимбаева 75, ТВ-каналы не показывают»</i>"
         )
         return
 
