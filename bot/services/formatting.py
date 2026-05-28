@@ -38,6 +38,18 @@ def format_ticket(t: Ticket) -> str:
         lines.append(f"💳 Лиц.счёт: {_e(t.license_account)}")
     if t.problem_description:
         lines.append(f"🔧 Проблема: {_e(t.problem_description)}")
+
+    # Тайминги статусов (если уже что-то нажато)
+    status_lines: list[str] = []
+    if t.departed_at:
+        status_lines.append(f"🚗 Выехал: {to_local(t.departed_at).strftime('%H:%M')}")
+    if t.arrived_at:
+        status_lines.append(f"📍 На месте: {to_local(t.arrived_at).strftime('%H:%M')}")
+    if t.finishing_at:
+        status_lines.append(f"⏳ Завершает с: {to_local(t.finishing_at).strftime('%H:%M')}")
+    if status_lines:
+        lines.extend(status_lines)
+
     if t.work_done:
         lines.append(f"✅ Что сделал: {_e(t.work_done)}")
     if t.materials:

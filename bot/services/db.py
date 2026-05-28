@@ -970,11 +970,42 @@ def _row_to_ticket(
         crm_ticket_number=row["crm_ticket_number"],
         license_account=row["license_account"],
         created_by_id=row["created_by_id"],
+        departed_at=row["departed_at"],
+        arrived_at=row["arrived_at"],
+        finishing_at=row["finishing_at"],
         created_at=row["created_at"],
         updated_at=row["updated_at"],
         materials=materials,
         photos=photos or [],
     )
+
+
+_STATUS_FIELDS = {"departed_at", "arrived_at", "finishing_at"}
+
+
+async def set_ticket_status(
+    user_id: int,
+    ticket_id: int,
+    field: str,
+) -> bool:
+    """
+    Проставляет timestamp статуса (departed_at/arrived_at/finishing_at).
+    Только для незакрытых заявок (без work_done) и только если ещё не проставлено.
+    """
+    if field not in _STATUS_FIELDS:
+        return False
+    pool = _get_pool()
+    result = await pool.execute(
+        f"""
+        UPDATE tickets
+        SET {field} = NOW(), updated_at = NOW()
+        WHERE id = $1 AND user_id = $2
+          AND {field} IS NULL
+          AND (work_done IS NULL OR work_done = '')
+        """,
+        ticket_id, user_id,
+    )
+    return not result.endswith(" 0")
 
 
 # --- История переписки -----------------------------------------------------

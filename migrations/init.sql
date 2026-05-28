@@ -40,6 +40,12 @@ CREATE INDEX IF NOT EXISTS idx_tickets_crm_number ON tickets(crm_ticket_number);
 ALTER TABLE tickets ADD COLUMN IF NOT EXISTS created_by_id BIGINT REFERENCES users(id);
 CREATE INDEX IF NOT EXISTS idx_tickets_created_by ON tickets(created_by_id);
 
+-- Тайминги статусов монтёра (выехал / на месте / завершаю).
+-- Каждое поле — момент нажатия соответствующей кнопки в Telegram.
+ALTER TABLE tickets ADD COLUMN IF NOT EXISTS departed_at TIMESTAMPTZ;
+ALTER TABLE tickets ADD COLUMN IF NOT EXISTS arrived_at TIMESTAMPTZ;
+ALTER TABLE tickets ADD COLUMN IF NOT EXISTS finishing_at TIMESTAMPTZ;
+
 -- Личный номер заявки у каждого пользователя (1, 2, 3...).
 -- Внутренний id остаётся для FK, наружу показывается user_ticket_number.
 ALTER TABLE tickets ADD COLUMN IF NOT EXISTS user_ticket_number INTEGER;

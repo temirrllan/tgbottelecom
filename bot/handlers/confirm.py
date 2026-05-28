@@ -50,6 +50,12 @@ class AssignCB(CallbackData, prefix="as"):
     monteur_id: int  # 0 — отмена
 
 
+class StatusCB(CallbackData, prefix="tst"):
+    """Нажатие кнопки статуса монтёром (🚗 / 📍 / ⏳)."""
+    ticket_id: int
+    status: str  # "departed" | "arrived" | "finishing"
+
+
 def _keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[[
@@ -381,8 +387,33 @@ async def on_assign(
         await notify_monteur(cb.bot, monteur["id"], saved, dispatcher)
 
 
+def _status_keyboard(ticket: Ticket) -> InlineKeyboardMarkup:
+    """Кнопки статуса под назначенной заявкой. Нажатые показывают время."""
+    from bot.services.tz import to_local
+
+    def _label(emoji: str, name: str, ts) -> str:
+        if ts:
+            return f"{emoji} ✓ {to_local(ts).strftime('%H:%M')}"
+        return f"{emoji} {name}"
+
+    return InlineKeyboardMarkup(inline_keyboard=[[
+        InlineKeyboardButton(
+            text=_label("🚗", "Выехал", ticket.departed_at),
+            callback_data=StatusCB(ticket_id=ticket.id, status="departed").pack(),
+        ),
+        InlineKeyboardButton(
+            text=_label("📍", "На месте", ticket.arrived_at),
+            callback_data=StatusCB(ticket_id=ticket.id, status="arrived").pack(),
+        ),
+        InlineKeyboardButton(
+            text=_label("⏳", "Завершаю", ticket.finishing_at),
+            callback_data=StatusCB(ticket_id=ticket.id, status="finishing").pack(),
+        ),
+    ]])
+
+
 async def notify_monteur(bot, monteur_id: int, ticket: Ticket, dispatcher: Optional[dict]) -> None:
-    """Шлёт монтёру уведомление о новой назначенной заявке."""
+    """Шлёт монтёру уведомление о новой назначенной заявке с кнопками статуса."""
     who = (
         f"от <b>{_e(dispatcher['full_name'])}</b> (КРОСС)"
         if dispatcher else "от КРОСС"
@@ -398,10 +429,95 @@ async def notify_monteur(bot, monteur_id: int, ticket: Ticket, dispatcher: Optio
         # Сначала фото, если есть
         if ticket.photos:
             await send_photos_to_chat(bot, monteur_id, ticket.photos)
-        await bot.send_message(monteur_id, text)
+        await bot.send_message(
+            monteur_id, text,
+            reply_markup=_status_keyboard(ticket),
+        )
     except Exception as e:
         logger.warning("Не удалось доставить заявку %s монтёру %s: %s",
                        ticket.id, monteur_id, e)
+
+
+# --- Хендлер кнопок статуса -------------------------------------------------
+
+_STATUS_TO_FIELD = {
+    "departed": "departed_at",
+    "arrived": "arrived_at",
+    "finishing": "finishing_at",
+}
+
+_STATUS_LABELS = {
+    "departed": "🚗 выехал",
+    "arrived": "📍 на месте",
+    "finishing": "⏳ завершает работу",
+}
+
+
+@router.callback_query(StatusCB.filter())
+async def on_status_button(
+    cb: CallbackQuery,
+    callback_data: StatusCB,
+) -> None:
+    """Монтёр нажал кнопку статуса. Записываем timestamp и пингуем КРОСС."""
+    if cb.from_user is None or cb.message is None:
+        await cb.answer()
+        return
+
+    field = _STATUS_TO_FIELD.get(callback_data.status)
+    if not field:
+        await cb.answer()
+        return
+
+    user_id = cb.from_user.id
+    ticket = await db.get_ticket(user_id, callback_data.ticket_id)
+    if ticket is None:
+        await cb.answer("Заявка не найдена или уже закрыта", show_alert=True)
+        return
+    if ticket.work_done:
+        await cb.answer("Заявка уже закрыта", show_alert=True)
+        return
+    if getattr(ticket, field) is not None:
+        await cb.answer("Уже отмечено ранее")
+        return
+
+    success = await db.set_ticket_status(user_id, callback_data.ticket_id, field)
+    if not success:
+        await cb.answer("Не получилось отметить статус", show_alert=True)
+        return
+
+    # Перечитываем заявку с новым timestamp'ом
+    updated = await db.get_ticket(user_id, callback_data.ticket_id)
+    if updated is None:
+        await cb.answer()
+        return
+
+    # Обновляем клавиатуру у монтёра — нажатая кнопка показывает время
+    try:
+        await cb.message.edit_reply_markup(reply_markup=_status_keyboard(updated))
+    except TelegramBadRequest:
+        pass
+
+    await cb.answer(f"Отмечено: {_STATUS_LABELS[callback_data.status]}")
+
+    # Пуш КРОСС-у — если заявка создана им
+    if updated.created_by_id and cb.bot is not None:
+        monteur = await db.get_user(user_id)
+        monteur_name = (monteur or {}).get("full_name", f"монтёр {user_id}")
+        number = updated.user_ticket_number or updated.id
+        status_text = _STATUS_LABELS[callback_data.status]
+        from bot.services.tz import to_local
+        when = to_local(getattr(updated, field)).strftime("%H:%M")
+        try:
+            await cb.bot.send_message(
+                updated.created_by_id,
+                f"{status_text}: <b>{_e(monteur_name)}</b> — заявка #{number}\n"
+                f"📍 {_e(updated.address)}\n"
+                f"⏰ {when}",
+            )
+        except Exception as e:
+            logger.warning(
+                "Не удалось уведомить КРОСС о статусе: %s", e,
+            )
 
 
 async def send_photos_to_chat(bot, chat_id: int, file_ids: list[str]) -> None:

@@ -75,6 +75,10 @@ class Ticket(BaseModel):
     customer_phone: Optional[str] = None
     crm_ticket_number: Optional[str] = None
     license_account: Optional[str] = None
+    # Тайминги статусов работы монтёра
+    departed_at: Optional[datetime] = None
+    arrived_at: Optional[datetime] = None
+    finishing_at: Optional[datetime] = None
     created_at: datetime
     updated_at: datetime
     materials: list[Material] = Field(default_factory=list)
