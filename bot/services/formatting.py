@@ -1,13 +1,33 @@
 """Форматирование заявок и сводок для вывода в Telegram."""
 from __future__ import annotations
 
+import re
 from datetime import date
 from decimal import Decimal
 from html import escape
-from typing import Iterable
+from typing import Iterable, Optional
 
 from bot.models.schemas import Ticket
 from bot.services.tz import to_local
+
+
+def format_phone_link(raw: Optional[str]) -> Optional[str]:
+    """
+    Превращает телефон в кликабельную tel:-ссылку.
+    На мобиле Telegram при тапе открывает звонилку.
+    7029583619 → <a href="tel:+77029583619">7029583619</a>
+    """
+    if not raw:
+        return None
+    digits = re.sub(r"\D", "", raw)
+    if not digits:
+        return None
+    # Нормализуем под Казахстан/Россию: 11 цифр с +7
+    if len(digits) == 11 and digits[0] in "78":
+        digits = "7" + digits[1:]
+    elif len(digits) == 10:
+        digits = "7" + digits
+    return f'<a href="tel:+{digits}">{_e(raw)}</a>'
 
 
 def _e(value) -> str:
@@ -33,7 +53,8 @@ def format_ticket(t: Ticket) -> str:
     if t.customer_name:
         lines.append(f"👤 Абонент: {_e(t.customer_name)}")
     if t.customer_phone:
-        lines.append(f"📞 Тел: {_e(t.customer_phone)}")
+        phone_link = format_phone_link(t.customer_phone) or _e(t.customer_phone)
+        lines.append(f"📞 Тел: {phone_link}")
     if t.license_account:
         lines.append(f"💳 Лиц.счёт: {_e(t.license_account)}")
     if t.problem_description:

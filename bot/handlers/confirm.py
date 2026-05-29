@@ -22,7 +22,7 @@ from pydantic import ValidationError
 
 from bot.models.schemas import Ticket, TicketIn
 from bot.services import ai, db
-from bot.services.formatting import format_ticket
+from bot.services.formatting import format_phone_link, format_ticket
 from bot.services.roles import is_dispatcher
 from bot.services.tz import to_local
 
@@ -54,6 +54,58 @@ class StatusCB(CallbackData, prefix="tst"):
     """Нажатие кнопки статуса монтёром (🚗 / 📍 / ⏳)."""
     ticket_id: int
     status: str  # "departed" | "arrived" | "finishing"
+
+
+class TemplateMenuCB(CallbackData, prefix="tpl"):
+    """Открыть меню шаблонов работ."""
+    ticket_id: int
+
+
+class TemplateApplyCB(CallbackData, prefix="tpa"):
+    """Применить выбранный шаблон к заявке."""
+    ticket_id: int
+    key: str  # ключ шаблона из QUICK_TEMPLATES
+
+
+class TTSCB(CallbackData, prefix="tts"):
+    """Озвучить карточку заявки."""
+    ticket_id: int
+
+
+# Шаблоны быстрого закрытия заявок
+QUICK_TEMPLATES = [
+    {
+        "key": "cable",
+        "label": "🔌 Замена кабеля",
+        "work_done": "Заменил кабель",
+        "materials": [{"name": "кабель", "quantity": "10", "unit": "м"}],
+    },
+    {
+        "key": "router",
+        "label": "📡 Установка роутера",
+        "work_done": "Установил роутер",
+        "materials": [{"name": "роутер", "quantity": "1", "unit": "шт"}],
+    },
+    {
+        "key": "prevent",
+        "label": "🔧 Профилактика",
+        "work_done": "Профилактика оборудования",
+        "materials": [],
+    },
+    {
+        "key": "conn",
+        "label": "🔗 Замена коннектора",
+        "work_done": "Заменил коннектор",
+        "materials": [{"name": "коннектор", "quantity": "1", "unit": "шт"}],
+    },
+    {
+        "key": "ont",
+        "label": "📦 Замена ONT/модема",
+        "work_done": "Заменил ONT/модем",
+        "materials": [{"name": "ONT", "quantity": "1", "unit": "шт"}],
+    },
+]
+_TEMPLATES_BY_KEY = {t["key"]: t for t in QUICK_TEMPLATES}
 
 
 def _keyboard() -> InlineKeyboardMarkup:
@@ -97,7 +149,8 @@ def _format_preview(t: TicketIn) -> str:
     if t.customer_name:
         lines.append(f"👤 Абонент: {_e(t.customer_name)}")
     if t.customer_phone:
-        lines.append(f"📞 Тел: {_e(t.customer_phone)}")
+        phone_link = format_phone_link(t.customer_phone) or _e(t.customer_phone)
+        lines.append(f"📞 Тел: {phone_link}")
     if t.license_account:
         lines.append(f"💳 Лиц.счёт: {_e(t.license_account)}")
     if t.problem_description:
@@ -172,8 +225,17 @@ async def show_preview(
         "" if ticket.photos
         else "\n\n<i>📷 Можешь приложить фото — пришли картинку.</i>"
     )
+    # Подсказка о похожих заявках на этом узле — на этапе создания
+    similar_hint = ""
+    similar = await db.count_similar_tickets_in_area(ticket.address, days=14)
+    if similar >= 2:
+        similar_hint = (
+            f"\n\n💡 <i>На этом узле уже <b>{similar}</b> заявок за 14 дней — "
+            f"возможно, проблема на сегменте.</i>"
+        )
     text = (
-        f"{head}\n\n{_format_preview(ticket)}{photo_hint}\n\nСохранить?"
+        f"{head}\n\n{_format_preview(ticket)}"
+        f"{similar_hint}{photo_hint}\n\nСохранить?"
     )
     sent = await message.answer(text, reply_markup=_keyboard())
     await state.update_data(preview_message_id=sent.message_id)
@@ -388,7 +450,7 @@ async def on_assign(
 
 
 def _status_keyboard(ticket: Ticket) -> InlineKeyboardMarkup:
-    """Кнопки статуса под назначенной заявкой. Нажатые показывают время."""
+    """Кнопки статуса + шаблоны + TTS. Нажатые статусы показывают время."""
     from bot.services.tz import to_local
 
     def _label(emoji: str, name: str, ts) -> str:
@@ -396,20 +458,45 @@ def _status_keyboard(ticket: Ticket) -> InlineKeyboardMarkup:
             return f"{emoji} ✓ {to_local(ts).strftime('%H:%M')}"
         return f"{emoji} {name}"
 
-    return InlineKeyboardMarkup(inline_keyboard=[[
-        InlineKeyboardButton(
-            text=_label("🚗", "Выехал", ticket.departed_at),
-            callback_data=StatusCB(ticket_id=ticket.id, status="departed").pack(),
-        ),
-        InlineKeyboardButton(
-            text=_label("📍", "На месте", ticket.arrived_at),
-            callback_data=StatusCB(ticket_id=ticket.id, status="arrived").pack(),
-        ),
-        InlineKeyboardButton(
-            text=_label("⏳", "Завершаю", ticket.finishing_at),
-            callback_data=StatusCB(ticket_id=ticket.id, status="finishing").pack(),
-        ),
-    ]])
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [
+            InlineKeyboardButton(
+                text=_label("🚗", "Выехал", ticket.departed_at),
+                callback_data=StatusCB(ticket_id=ticket.id, status="departed").pack(),
+            ),
+            InlineKeyboardButton(
+                text=_label("📍", "На месте", ticket.arrived_at),
+                callback_data=StatusCB(ticket_id=ticket.id, status="arrived").pack(),
+            ),
+            InlineKeyboardButton(
+                text=_label("⏳", "Завершаю", ticket.finishing_at),
+                callback_data=StatusCB(ticket_id=ticket.id, status="finishing").pack(),
+            ),
+        ],
+        [
+            InlineKeyboardButton(
+                text="📋 Шаблон закрытия",
+                callback_data=TemplateMenuCB(ticket_id=ticket.id).pack(),
+            ),
+            InlineKeyboardButton(
+                text="🔊 Озвучить",
+                callback_data=TTSCB(ticket_id=ticket.id).pack(),
+            ),
+        ],
+    ])
+
+
+async def _build_similar_hint(ticket: Ticket) -> str:
+    """Возвращает HTML-строку с подсказкой о похожих заявках, или пусто."""
+    similar = await db.count_similar_tickets_in_area(
+        ticket.address, days=14, exclude_ticket_id=ticket.id,
+    )
+    if similar < 2:
+        return ""
+    return (
+        f"\n\n💡 <i>На этом узле уже <b>{similar}</b> заявок за последние 14 дней — "
+        f"возможно, проблема на сегменте.</i>"
+    )
 
 
 async def notify_monteur(bot, monteur_id: int, ticket: Ticket, dispatcher: Optional[dict]) -> None:
@@ -419,12 +506,16 @@ async def notify_monteur(bot, monteur_id: int, ticket: Ticket, dispatcher: Optio
         if dispatcher else "от КРОСС"
     )
     number = ticket.user_ticket_number or ticket.id
+    similar_hint = await _build_similar_hint(ticket)
     hint = (
         f"\n\n<i>💬 Когда выполнишь — напиши боту "
-        f"«по {number} заменил кабель, акт 321» (или другой результат). "
-        f"КРОСС сразу получит уведомление о закрытии.</i>"
+        f"«по {number} заменил кабель, акт 321» (или другой результат), "
+        f"либо нажми «📋 Шаблон закрытия».</i>"
     )
-    text = f"🆕 <b>Новая заявка {who}</b>\n\n" + format_ticket(ticket) + hint
+    text = (
+        f"🆕 <b>Новая заявка {who}</b>\n\n"
+        + format_ticket(ticket) + similar_hint + hint
+    )
     try:
         # Сначала фото, если есть
         if ticket.photos:
@@ -518,6 +609,164 @@ async def on_status_button(
             logger.warning(
                 "Не удалось уведомить КРОСС о статусе: %s", e,
             )
+
+
+# --- Шаблоны закрытия заявки ------------------------------------------------
+
+@router.callback_query(TemplateMenuCB.filter())
+async def on_template_menu(
+    cb: CallbackQuery,
+    callback_data: TemplateMenuCB,
+) -> None:
+    """Показывает меню шаблонов для быстрого закрытия."""
+    if cb.from_user is None or cb.message is None:
+        await cb.answer()
+        return
+
+    ticket = await db.get_ticket(cb.from_user.id, callback_data.ticket_id)
+    if ticket is None:
+        await cb.answer("Заявка не найдена", show_alert=True)
+        return
+    if ticket.work_done:
+        await cb.answer("Заявка уже закрыта", show_alert=True)
+        return
+
+    number = ticket.user_ticket_number or ticket.id
+    rows: list[list[InlineKeyboardButton]] = []
+    for tpl in QUICK_TEMPLATES:
+        rows.append([InlineKeyboardButton(
+            text=tpl["label"],
+            callback_data=TemplateApplyCB(
+                ticket_id=ticket.id, key=tpl["key"],
+            ).pack(),
+        )])
+    rows.append([InlineKeyboardButton(
+        text="❌ Отмена",
+        callback_data=TemplateApplyCB(ticket_id=ticket.id, key="cancel").pack(),
+    )])
+
+    await cb.message.answer(
+        f"📋 <b>Шаблон закрытия для заявки #{number}</b>\n"
+        f"Выбери — бот сразу закроет с этими данными.\n"
+        f"<i>Подкорректировать можно потом через «по {number} ...»</i>",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=rows),
+    )
+    await cb.answer()
+
+
+@router.callback_query(TemplateApplyCB.filter())
+async def on_template_apply(
+    cb: CallbackQuery,
+    callback_data: TemplateApplyCB,
+) -> None:
+    """Применяет шаблон: закрывает заявку с work_done + материалами."""
+    if cb.from_user is None or cb.message is None:
+        await cb.answer()
+        return
+
+    try:
+        await cb.message.edit_reply_markup(reply_markup=None)
+    except TelegramBadRequest:
+        pass
+
+    if callback_data.key == "cancel":
+        await cb.message.answer("❌ Отмена шаблона.")
+        await cb.answer()
+        return
+
+    tpl = _TEMPLATES_BY_KEY.get(callback_data.key)
+    if tpl is None:
+        await cb.answer("Шаблон не найден", show_alert=True)
+        return
+
+    user_id = cb.from_user.id
+    existing = await db.get_ticket(user_id, callback_data.ticket_id)
+    if existing is None:
+        await cb.answer("Заявка не найдена", show_alert=True)
+        return
+    if existing.work_done:
+        await cb.answer("Заявка уже закрыта", show_alert=True)
+        return
+
+    from bot.models.schemas import TicketUpdate
+    upd = TicketUpdate(
+        work_done=tpl["work_done"],
+        materials=tpl["materials"] or None,
+    )
+    ok = await db.update_ticket(user_id, callback_data.ticket_id, upd)
+    if not ok:
+        await cb.answer("Не получилось применить шаблон", show_alert=True)
+        return
+
+    updated = await db.get_ticket(user_id, callback_data.ticket_id)
+    if updated is None:
+        await cb.answer()
+        return
+    number = updated.user_ticket_number or updated.id
+    await cb.message.answer(
+        f"✅ <b>Заявка #{number} закрыта по шаблону «{tpl['label']}»</b>\n\n"
+        + format_ticket(updated)
+    )
+    await cb.answer("Закрыто")
+
+    # Уведомление КРОСС-у — копия логики из chat._handle_edit
+    if updated.created_by_id and cb.bot is not None:
+        monteur = await db.get_user(user_id)
+        monteur_name = (monteur or {}).get("full_name", f"монтёр {user_id}")
+        try:
+            await cb.bot.send_message(
+                updated.created_by_id,
+                f"✅ <b>{_e(monteur_name)}</b> закрыл заявку #{number} "
+                f"<i>(по шаблону)</i>\n\n"
+                + format_ticket(updated),
+            )
+        except Exception as e:
+            logger.warning("Не удалось уведомить КРОСС о закрытии шаблоном: %s", e)
+
+
+# --- Озвучка карточки (TTS) -------------------------------------------------
+
+@router.callback_query(TTSCB.filter())
+async def on_tts(cb: CallbackQuery, callback_data: TTSCB) -> None:
+    """Озвучивает карточку заявки голосом через OpenAI TTS."""
+    if cb.from_user is None or cb.message is None or cb.bot is None:
+        await cb.answer()
+        return
+
+    ticket = await db.get_ticket(cb.from_user.id, callback_data.ticket_id)
+    if ticket is None:
+        await cb.answer("Заявка не найдена", show_alert=True)
+        return
+
+    await cb.answer("Генерирую озвучку…")
+
+    # Собираем читаемый текст без HTML
+    text_parts: list[str] = []
+    number = ticket.user_ticket_number or ticket.id
+    text_parts.append(f"Заявка номер {number}.")
+    text_parts.append(f"Адрес: {ticket.address}.")
+    if ticket.customer_name:
+        text_parts.append(f"Абонент: {ticket.customer_name}.")
+    if ticket.customer_phone:
+        # Цифры по одной — лучше воспринимаются на слух
+        digits = " ".join(ticket.customer_phone)
+        text_parts.append(f"Телефон: {digits}.")
+    if ticket.problem_description:
+        text_parts.append(f"Проблема: {ticket.problem_description}.")
+    speech_text = " ".join(text_parts)
+
+    audio_bytes = await ai.synthesize_speech(speech_text)
+    if not audio_bytes:
+        await cb.message.answer("Не удалось озвучить заявку. Попробуй позже.")
+        return
+
+    from aiogram.types import BufferedInputFile
+    voice = BufferedInputFile(audio_bytes, filename=f"ticket_{number}.opus")
+    try:
+        await cb.bot.send_voice(cb.message.chat.id, voice=voice)
+    except Exception as e:
+        logger.warning("Не удалось отправить голосовое TTS: %s", e)
+        await cb.message.answer("Не получилось отправить голосовое.")
 
 
 async def send_photos_to_chat(bot, chat_id: int, file_ids: list[str]) -> None:

@@ -306,6 +306,38 @@ async def transcribe_voice(
     return text or None
 
 
+async def synthesize_speech(text: str) -> Optional[bytes]:
+    """
+    Озвучивает текст через OpenAI TTS, возвращает байты OGG/Opus.
+    Telegram воспроизводит этот формат как обычное голосовое сообщение.
+    """
+    if not text or not text.strip():
+        return None
+    client = get_client()
+    voice = os.getenv("OPENAI_TTS_VOICE", "alloy")
+    tts_model = os.getenv("OPENAI_TTS_MODEL", "tts-1")
+    try:
+        response = await client.audio.speech.create(
+            model=tts_model,
+            voice=voice,
+            input=text,
+            response_format="opus",
+        )
+    except Exception as err:
+        if _is_rate_limit_error(err):
+            logger.warning("OpenAI rate limit при TTS")
+        else:
+            logger.exception("Ошибка TTS")
+        return None
+
+    try:
+        # У ответа SDK есть .read() — возвращает bytes
+        return await response.aread()
+    except AttributeError:
+        # На случай SDK с .content
+        return getattr(response, "content", None)
+
+
 VISION_PROMPT = """На вход дано изображение. Скорее всего это скриншот заявки из CRM-системы Казактелекома («Единичное повреждение», «WFM», окно заявки и т. п.).
 
 Если это действительно скриншот CRM-заявки — извлеки данные и верни JSON:

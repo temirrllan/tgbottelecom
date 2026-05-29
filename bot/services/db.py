@@ -820,6 +820,32 @@ async def top_materials_since(
     ]
 
 
+async def count_similar_tickets_in_area(
+    address: str,
+    days: int = 14,
+    exclude_ticket_id: Optional[int] = None,
+) -> int:
+    """
+    Считает заявки на ту же улицу/район за последние N дней — по ВСЕЙ бригаде.
+    Нужно для подсказки «на этом узле уже N жалоб за период».
+    """
+    if not address or not address.strip():
+        return 0
+    key = _address_key(address)
+    pool = _get_pool()
+    query = """
+        SELECT COUNT(*) FROM tickets
+        WHERE address ILIKE $1
+          AND visit_date >= NOW() - $2::interval
+    """
+    args: list = [f"%{key}%", timedelta(days=days)]
+    if exclude_ticket_id is not None:
+        query += " AND id <> $3"
+        args.append(exclude_ticket_id)
+    val = await pool.fetchval(query, *args)
+    return int(val or 0)
+
+
 async def count_recent_visits_at_address(
     user_id: int,
     address: str,
