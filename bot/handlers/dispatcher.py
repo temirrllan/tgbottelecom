@@ -11,11 +11,14 @@ from __future__ import annotations
 
 import logging
 from html import escape
+from typing import Optional
 
 from aiogram import F, Router
 from aiogram.exceptions import TelegramBadRequest
-from aiogram.filters import Command
+from aiogram.filters import Command, StateFilter
 from aiogram.filters.callback_data import CallbackData
+from aiogram.fsm.context import FSMContext
+from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import (
     CallbackQuery,
     InlineKeyboardButton,
@@ -49,6 +52,16 @@ class DeleteConfirmCB(CallbackData, prefix="dcf"):
     """Подтверждение удаления."""
     ticket_id: int
     confirm: int  # 0 = отмена, 1 = удалить
+
+
+class MsgToCB(CallbackData, prefix="mto"):
+    """Выбор монтёра для прямого сообщения."""
+    monteur_id: int  # 0 = отмена
+
+
+class DispatcherMessaging(StatesGroup):
+    """FSM КРОСС, когда она набирает сообщение монтёру через /msg."""
+    composing = State()
 
 
 # --- /team ------------------------------------------------------------------
@@ -403,3 +416,191 @@ async def on_delete_confirm(
                 "Не удалось уведомить монтёра %s об удалении: %s",
                 executor_id, e,
             )
+
+
+# --- /msg — прямое сообщение монтёру ---------------------------------------
+
+@router.message(Command("msg"))
+async def cmd_msg(message: Message, state: FSMContext) -> None:
+    """Открывает выбор монтёра для отправки прямого сообщения."""
+    if message.from_user is None:
+        return
+    if not is_dispatcher(message.from_user.id):
+        await message.answer("Эта команда — только для КРОСС.")
+        return
+
+    monteurs = await db.list_users_except(dispatcher_ids())
+    if not monteurs:
+        await message.answer(
+            "Монтёров в системе нет. Попроси их написать боту /start."
+        )
+        return
+
+    rows: list[list[InlineKeyboardButton]] = []
+    for m in monteurs:
+        rows.append([InlineKeyboardButton(
+            text=f"👷 {m['full_name']}",
+            callback_data=MsgToCB(monteur_id=m["id"]).pack(),
+        )])
+    rows.append([InlineKeyboardButton(
+        text="❌ Отмена",
+        callback_data=MsgToCB(monteur_id=0).pack(),
+    )])
+
+    await message.answer(
+        "📩 <b>Кому отправить сообщение?</b>",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=rows),
+    )
+
+
+@router.callback_query(MsgToCB.filter())
+async def on_msg_to_chosen(
+    cb: CallbackQuery,
+    callback_data: MsgToCB,
+    state: FSMContext,
+) -> None:
+    """КРОСС выбрала монтёра — теперь ждём само сообщение."""
+    if cb.from_user is None or cb.message is None:
+        await cb.answer()
+        return
+    if not is_dispatcher(cb.from_user.id):
+        await cb.answer("Только для КРОСС", show_alert=True)
+        return
+
+    try:
+        await cb.message.edit_reply_markup(reply_markup=None)
+    except TelegramBadRequest:
+        pass
+
+    if callback_data.monteur_id == 0:
+        await state.clear()
+        await cb.message.answer("❌ Отмена.")
+        await cb.answer()
+        return
+
+    monteur = await db.get_user(callback_data.monteur_id)
+    if monteur is None:
+        await cb.answer("Монтёр не найден", show_alert=True)
+        return
+
+    await state.set_state(DispatcherMessaging.composing)
+    await state.update_data(target_monteur_id=callback_data.monteur_id)
+    await cb.message.answer(
+        f"✍️ Напиши сообщение для <b>{escape(monteur['full_name'], quote=False)}</b>.\n"
+        f"Можно текст, голосовое или фото.\n\n"
+        f"<i>/cancel — отмена</i>"
+    )
+    await cb.answer()
+
+
+# --- Перехват сообщений КРОСС в режиме compose ------------------------------
+
+async def _resolve_target(state: FSMContext) -> Optional[dict]:
+    """Достаёт из FSM выбранного монтёра."""
+    data = await state.get_data()
+    tid = data.get("target_monteur_id")
+    if not tid:
+        return None
+    return await db.get_user(int(tid))
+
+
+def _msg_header(sender_name: str, kind: str) -> str:
+    """Префикс пересланного сообщения. kind: 'сообщение' / 'голосовое' / 'фото'."""
+    return f"📩 <b>{kind.capitalize()} от {escape(sender_name, quote=False)} (КРОСС)</b>"
+
+
+@router.message(
+    StateFilter(DispatcherMessaging.composing),
+    F.text & ~F.text.startswith("/"),
+)
+async def on_msg_text(message: Message, state: FSMContext) -> None:
+    if message.from_user is None or not message.text or message.bot is None:
+        return
+    target = await _resolve_target(state)
+    if target is None:
+        await state.clear()
+        await message.answer("Получатель потерян, попробуй /msg заново.")
+        return
+
+    sender = await db.get_user(message.from_user.id)
+    sender_name = (sender or {}).get("full_name", "КРОСС")
+
+    body = escape(message.text, quote=False)
+    try:
+        await message.bot.send_message(
+            target["id"],
+            f"{_msg_header(sender_name, 'сообщение')}\n\n{body}",
+        )
+        await message.answer(
+            f"✅ Доставил <b>{escape(target['full_name'], quote=False)}</b>:\n"
+            f"<i>«{body[:200]}»</i>"
+        )
+    except Exception as e:
+        logger.warning("Не доставил текст %s: %s", target["id"], e)
+        await message.answer(
+            "Не удалось доставить — возможно, монтёр ещё не нажимал /start."
+        )
+    await state.clear()
+
+
+@router.message(
+    StateFilter(DispatcherMessaging.composing),
+    F.voice,
+)
+async def on_msg_voice(message: Message, state: FSMContext) -> None:
+    if message.from_user is None or message.voice is None or message.bot is None:
+        return
+    target = await _resolve_target(state)
+    if target is None:
+        await state.clear()
+        await message.answer("Получатель потерян, попробуй /msg заново.")
+        return
+
+    sender = await db.get_user(message.from_user.id)
+    sender_name = (sender or {}).get("full_name", "КРОСС")
+
+    try:
+        await message.bot.send_message(
+            target["id"],
+            _msg_header(sender_name, "голосовое"),
+        )
+        await message.bot.send_voice(target["id"], message.voice.file_id)
+        await message.answer(
+            f"✅ Голосовое отправлено <b>{escape(target['full_name'], quote=False)}</b>."
+        )
+    except Exception as e:
+        logger.warning("Не доставил voice %s: %s", target["id"], e)
+        await message.answer("Не удалось переслать голосовое.")
+    await state.clear()
+
+
+@router.message(
+    StateFilter(DispatcherMessaging.composing),
+    F.photo,
+)
+async def on_msg_photo(message: Message, state: FSMContext) -> None:
+    if message.from_user is None or not message.photo or message.bot is None:
+        return
+    target = await _resolve_target(state)
+    if target is None:
+        await state.clear()
+        await message.answer("Получатель потерян, попробуй /msg заново.")
+        return
+
+    sender = await db.get_user(message.from_user.id)
+    sender_name = (sender or {}).get("full_name", "КРОСС")
+    caption = (message.caption or "").strip()
+
+    try:
+        header = _msg_header(sender_name, "фото")
+        if caption:
+            header += f"\n\n{escape(caption, quote=False)}"
+        await message.bot.send_message(target["id"], header)
+        await message.bot.send_photo(target["id"], message.photo[-1].file_id)
+        await message.answer(
+            f"✅ Фото отправлено <b>{escape(target['full_name'], quote=False)}</b>."
+        )
+    except Exception as e:
+        logger.warning("Не доставил фото %s: %s", target["id"], e)
+        await message.answer("Не удалось переслать фото.")
+    await state.clear()
